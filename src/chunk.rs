@@ -913,6 +913,10 @@ fn read_btree_v2_chunk_entries<R: ReadAt + ?Sized>(
         let data = &record.data;
         let mut pos = 0;
 
+        // Read chunk address first (HDF5 stores address before scaled offsets)
+        let address = read_var_uint_slice(data, pos, o);
+        pos += o;
+
         // Read scaled offsets
         let mut scaled = Vec::with_capacity(ndims);
         for i in 0..ndims {
@@ -921,10 +925,6 @@ fn read_btree_v2_chunk_entries<R: ReadAt + ?Sized>(
             scaled.push(val);
             pos += enc_size;
         }
-
-        // Read chunk address
-        let address = read_var_uint_slice(data, pos, o);
-        pos += o;
 
         let (filtered_size, filter_mask) = if has_filters {
             let nbytes = read_var_uint_slice(data, pos, chunk_size_len);

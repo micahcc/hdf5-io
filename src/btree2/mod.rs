@@ -247,8 +247,9 @@ where
         });
     }
 
-    // Verify checksum over the entire node (node_size - 4 bytes)
-    let check_len = header.node_size as usize - 4;
+    // Verify checksum: covers header (6 bytes) + records, checksum follows immediately
+    let rec_size = header.record_size as usize;
+    let check_len = 6 + num_records as usize * rec_size;
     let mut check_data = vec![0u8; check_len];
     reader
         .read_exact_at(addr, &mut check_data)
@@ -264,7 +265,6 @@ where
 
     // Read records starting after the 6-byte prefix (magic + version + type)
     let records_start = addr + 6;
-    let rec_size = header.record_size as usize;
 
     for i in 0..num_records as usize {
         let rec_off = records_start + (i * rec_size) as u64;
@@ -311,26 +311,6 @@ where
         });
     }
 
-    // For now, read the whole node and verify checksum
-    let check_len = header.node_size as usize - 4;
-    let mut node_data = vec![0u8; header.node_size as usize];
-    reader
-        .read_exact_at(addr, &mut node_data)
-        .map_err(Error::Io)?;
-    let stored = u32::from_le_bytes([
-        node_data[check_len],
-        node_data[check_len + 1],
-        node_data[check_len + 2],
-        node_data[check_len + 3],
-    ]);
-    let computed = checksum::lookup3(&node_data[..check_len]);
-    if computed != stored {
-        return Err(Error::ChecksumMismatch {
-            expected: stored,
-            actual: computed,
-        });
-    }
-
     // Determine the size of the child pointer entries.
     // Each child entry: address (size_of_offsets) + num_records (variable) + total_records (variable if depth > 1)
     // The num_records field size depends on the max possible records per node.
@@ -357,11 +337,32 @@ where
     let child_entry_size = o + num_rec_bytes + total_rec_bytes;
     let rec_size = header.record_size as usize;
 
+    // Compute actual content size: header(6) + interleaved children/records
+    let n = num_records as usize;
+    let content_len = 6 + (n + 1) * child_entry_size + n * rec_size;
+
+    // Read node data and verify checksum (checksum follows content immediately)
+    let read_len = content_len + 4;
+    let mut node_data = vec![0u8; read_len];
+    reader
+        .read_exact_at(addr, &mut node_data)
+        .map_err(Error::Io)?;
+    let stored = u32::from_le_bytes([
+        node_data[content_len],
+        node_data[content_len + 1],
+        node_data[content_len + 2],
+        node_data[content_len + 3],
+    ]);
+    let computed = checksum::lookup3(&node_data[..content_len]);
+    if computed != stored {
+        return Err(Error::ChecksumMismatch {
+            expected: stored,
+            actual: computed,
+        });
+    }
+
     // Parse interleaved children and records
     let mut pos = 6usize; // after magic + version + type
-
-    // There are num_records + 1 children
-    let n = num_records as usize;
     let mut children: Vec<(u64, u16)> = Vec::with_capacity(n + 1); // (addr, num_records)
     let mut records: Vec<Record> = Vec::with_capacity(n);
 

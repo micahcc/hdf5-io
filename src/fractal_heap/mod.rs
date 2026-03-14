@@ -367,7 +367,7 @@ fn read_var_le(data: &[u8], len: usize) -> u64 {
 /// Read an object from a direct block at the given heap offset.
 fn read_from_direct_block<R: ReadAt + ?Sized>(
     reader: &R,
-    header: &FractalHeapHeader,
+    _header: &FractalHeapHeader,
     block_addr: u64,
     heap_offset: u64,
     obj_length: u64,
@@ -393,24 +393,11 @@ fn read_from_direct_block<R: ReadAt + ?Sized>(
         });
     }
 
-    // Skip: magic(4) + version(1) + heap_addr(size_of_offsets) + block_offset(block_offset_byte_size)
-    let block_offset_size = header.block_offset_byte_size();
-    let overhead = 5 + _size_of_offsets as u64 + block_offset_size as u64;
-    let has_checksum = (header.flags & 0x02) != 0;
-    let _checksum_size = if has_checksum { 4u64 } else { 0 };
-
-    // The data starts after the overhead
-    let data_start = block_addr + overhead;
-
-    // The heap_offset is relative to the start of managed heap space.
-    // For a root direct block, the block's heap offset is 0, so the object
-    // is at data_start + heap_offset.
-    // For non-root direct blocks, we'd need to subtract the block's heap offset.
-    // For now, assume this is the correct direct block and use relative addressing.
-
+    // The heap offset in the managed object ID includes the direct block overhead.
+    // Objects are addressed relative to the start of the direct block.
     let mut obj_data = vec![0u8; obj_length as usize];
     reader
-        .read_exact_at(data_start + heap_offset, &mut obj_data)
+        .read_exact_at(block_addr + heap_offset, &mut obj_data)
         .map_err(Error::Io)?;
     Ok(obj_data)
 }

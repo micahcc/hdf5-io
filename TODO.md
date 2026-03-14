@@ -22,8 +22,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
   - [x] Link (0x0006): hard, soft, external
   - [x] Link Info (0x0002): fractal heap addr, B-tree v2 addrs
   - [x] Object Header Continuation (0x0010)
-  - [ ] Fill Value (0x0005): version, space/write times, defined flag, value
-  - [ ] Attribute Info (0x0015): dense attribute storage via fractal heap
+  - [x] Fill Value (0x0005): version, space/write times, defined flag, value
+  - [x] Attribute Info (0x0015): dense attribute storage via fractal heap
   - [ ] Group Info (0x000A)
   - [ ] Fill Value Old (0x0004)
 
@@ -34,9 +34,9 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Tree iteration (walk all records in sorted order)
 - [x] Record type 5: Link Name for indexed groups (hash + heap ID)
 - [ ] Record type 6: Creation Order for indexed groups
-- [ ] Record type 8: Attribute Name for indexed attributes
+- [x] Record type 8: Attribute Name for indexed attributes
 - [ ] Record type 9: Attribute Creation Order
-- [ ] Record types 10/11: Chunked dataset indexing
+- [x] Record types 10/11: Chunked dataset indexing
 
 ## Phase 4: Fractal Heap
 - [x] Fractal heap header parsing (magic `FRHP`, all fields + doubling table info)
@@ -71,7 +71,7 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Contiguous layout: read raw bytes from file offset
 - [x] Compact layout: read raw bytes from object header
 - [x] Chunked layout with B-tree v1 index (layout v3)
-- [ ] Chunked layout with B-tree v2 index
+- [x] Chunked layout with B-tree v2 index
 - [x] Chunked layout with extensible array index
 - [x] Chunked layout with fixed array index
 - [x] Single chunk optimization
@@ -117,6 +117,9 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Fixture files for compound, enum, array types
 - [x] Fletcher32 checksum filter fixture + integration test
 - [x] Fixture files for vlen string + vlen sequence types
+- [x] Fill value fixture + integration test
+- [x] Dense attributes fixture + integration test
+- [x] B-tree v2 chunk index fixture + integration test
 - [ ] Large file (>4GB) fixture
 - [ ] SWMR file fixture (superblock v3 specific)
 - [ ] Fuzz testing on malformed inputs
