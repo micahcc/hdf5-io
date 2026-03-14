@@ -72,7 +72,7 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Compact layout: read raw bytes from object header
 - [x] Chunked layout with B-tree v1 index (layout v3)
 - [x] Chunked layout with B-tree v2 index
-- [x] Chunked layout with extensible array index (including data blocks + super blocks)
+- [x] Chunked layout with extensible array index (data blocks + super blocks + paged data blocks)
 - [x] Chunked layout with fixed array index
 - [x] Single chunk optimization
 - [x] Filter pipeline application on chunked read
@@ -103,6 +103,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] `Dataset::read_vlen_strings()` — read vlen strings as `Vec<String>`
 - [x] `Dataset::read_slice()` — read hyperslab
 - [x] Shared/committed datatype resolution (shared message records v1/v2/v3)
+- [x] Shared datatypes/dataspaces in attributes (attribute flags bits 0/1)
+- [x] Empty/unallocated chunked datasets (return zeros when address is UNDEF)
 
 ## Phase 9: WASM & Portability
 - [x] `ReadAt` impl for `&[u8]` / `Vec<u8>` (in-memory buffer)
@@ -126,6 +128,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Hyperslab read integration tests (contiguous, compact, chunked)
 - [x] Committed datatype fixture + integration test
 - [x] Extensible array data blocks fixture + integration test (25 chunks)
+- [x] Shared attribute type fixture + integration test
+- [x] Empty/unallocated chunked dataset fixture + integration test
 - [ ] Large file (>4GB) fixture
 - [ ] SWMR file fixture (superblock v3 specific)
 - [ ] Fuzz testing on malformed inputs

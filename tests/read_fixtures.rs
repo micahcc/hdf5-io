@@ -745,6 +745,51 @@ fn read_committed_datatype() {
     assert_eq!(vals2, vec![100, 200, 300, 400, 500]);
 }
 
+// ── Shared datatypes in attributes ──
+
+#[test]
+fn read_shared_attribute_type() {
+    let file = File::open(fixture("shared_attr.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    // Dataset uses committed type
+    let dt = ds.datatype().unwrap();
+    assert!(matches!(dt, Datatype::FixedPoint { size: 4, .. }));
+
+    // Attribute also uses the same committed type
+    let attrs = ds.attributes().unwrap();
+    let scale = attrs.iter().find(|a| a.name == "scale").expect("missing 'scale' attr");
+    assert!(
+        matches!(scale.datatype, Datatype::FixedPoint { size: 4, .. }),
+        "expected shared i32 type, got {:?}",
+        scale.datatype
+    );
+    let val = i32::from_le_bytes(scale.raw_value[..4].try_into().unwrap());
+    assert_eq!(val, 42);
+}
+
+// ── Empty / unallocated chunked datasets ──
+
+#[test]
+fn read_empty_chunked() {
+    let file = File::open(fixture("empty_chunked.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("empty").unwrap();
+
+    assert_eq!(ds.shape().unwrap(), vec![10]);
+
+    // Should return all zeros (no data written)
+    let raw = ds.read_raw().unwrap();
+    assert_eq!(raw.len(), 40); // 10 * 4 bytes
+    assert!(raw.iter().all(|&b| b == 0), "expected all zeros for unallocated dataset");
+
+    // read_slice should also work
+    let slice = ds.read_slice(&[2], &[3]).unwrap();
+    assert_eq!(slice.len(), 12);
+    assert!(slice.iter().all(|&b| b == 0));
+}
+
 // ── Extensible array with data blocks ──
 
 #[test]

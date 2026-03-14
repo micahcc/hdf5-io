@@ -698,6 +698,73 @@ static void create_ea_large(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* Create a dataset with a committed type, plus attributes using that same
+ * committed type so we exercise shared-in-attributes resolution. */
+static void create_shared_attr(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Commit a named type */
+    hid_t dtype = H5Tcopy(H5T_STD_I32LE);
+    H5Tcommit2(file, "shared_i32", dtype, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    /* Create a dataset using the committed type */
+    hsize_t dims[1] = {3};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(file, "data", dtype, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    int32_t vals[3] = {11, 22, 33};
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    /* Add an attribute using the same committed type */
+    hid_t attr_space = H5Screate(H5S_SCALAR);
+    hid_t attr = H5Acreate2(dset, "scale", dtype, attr_space,
+                             H5P_DEFAULT, H5P_DEFAULT);
+    int32_t scale = 42;
+    H5Awrite(attr, H5T_NATIVE_INT, &scale);
+    H5Aclose(attr);
+    H5Sclose(attr_space);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Tclose(dtype);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a chunked dataset that is allocated but never written to —
+ * the chunk index address is undefined. */
+static void create_empty_chunked(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    hsize_t dims[1] = {10};
+    hsize_t maxdims[1] = {H5S_UNLIMITED};
+    hid_t space = H5Screate_simple(1, dims, maxdims);
+
+    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    hsize_t chunk_dims[1] = {5};
+    H5Pset_chunk(dcpl, 1, chunk_dims);
+
+    /* Create but do NOT write — chunk index address should be UNDEF */
+    hid_t dset = H5Dcreate2(file, "empty", H5T_STD_I32LE, space,
+                             H5P_DEFAULT, dcpl, H5P_DEFAULT);
+
+    H5Dclose(dset);
+    H5Pclose(dcpl);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 /* Create a big-endian dataset for testing byte-swap on read. */
 static void create_big_endian(const char *filename)
 {
@@ -746,5 +813,7 @@ int main(void)
     create_big_endian("big_endian.h5");
     create_committed_datatype("committed_datatype.h5");
     create_ea_large("ea_large.h5");
+    create_shared_attr("shared_attr.h5");
+    create_empty_chunked("empty_chunked.h5");
     return 0;
 }

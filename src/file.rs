@@ -914,7 +914,7 @@ fn parse_attributes<R: ReadAt + ?Sized>(
 
     for msg in &header.messages {
         if msg.msg_type == MessageType::Attribute {
-            if let Ok(attr) = parse_attribute_message(&msg.data) {
+            if let Ok(attr) = parse_attribute_message(&msg.data, file) {
                 attrs.push(attr);
             }
         }
@@ -1005,7 +1005,7 @@ fn parse_dense_attributes<R: ReadAt + ?Sized>(
                 so,
                 sl,
             )?;
-            if let Ok(attr) = parse_attribute_message(&attr_data) {
+            if let Ok(attr) = parse_attribute_message(&attr_data, file) {
                 attrs.push(attr);
             }
         }
@@ -1030,7 +1030,10 @@ fn parse_dense_attributes<R: ReadAt + ?Sized>(
 /// Dataspace message
 /// Value
 /// ```
-fn parse_attribute_message(data: &[u8]) -> Result<Attribute> {
+fn parse_attribute_message<R: ReadAt + ?Sized>(
+    data: &[u8],
+    file: &File<R>,
+) -> Result<Attribute> {
     if data.len() < 6 {
         return Err(Error::InvalidObjectHeader {
             msg: "attribute message too short".into(),
@@ -1038,7 +1041,7 @@ fn parse_attribute_message(data: &[u8]) -> Result<Attribute> {
     }
 
     let version = data[0];
-    let _flags = data[1];
+    let flags = data[1];
     let name_size = u16::from_le_bytes([data[2], data[3]]) as usize;
     let dt_size = u16::from_le_bytes([data[4], data[5]]) as usize;
     let ds_size = u16::from_le_bytes([data[6], data[7]]) as usize;
@@ -1069,26 +1072,38 @@ fn parse_attribute_message(data: &[u8]) -> Result<Attribute> {
         pos = (pos + 7) & !7;
     }
 
-    // Datatype
+    // Datatype (may be shared — attribute flags bit 0)
     if pos + dt_size > data.len() {
         return Err(Error::InvalidObjectHeader {
             msg: "attribute datatype truncated".into(),
         });
     }
-    let datatype = Datatype::parse(&data[pos..pos + dt_size])?;
+    let dt_data = &data[pos..pos + dt_size];
+    let datatype = if (flags & 0x01) != 0 {
+        let resolved = file.resolve_shared_message(dt_data, MessageType::Datatype)?;
+        Datatype::parse(&resolved)?
+    } else {
+        Datatype::parse(dt_data)?
+    };
     pos += dt_size;
 
     if version == 1 {
         pos = (pos + 7) & !7;
     }
 
-    // Dataspace
+    // Dataspace (may be shared — attribute flags bit 1)
     if pos + ds_size > data.len() {
         return Err(Error::InvalidObjectHeader {
             msg: "attribute dataspace truncated".into(),
         });
     }
-    let dataspace = Dataspace::parse(&data[pos..pos + ds_size])?;
+    let ds_data = &data[pos..pos + ds_size];
+    let dataspace = if (flags & 0x02) != 0 {
+        let resolved = file.resolve_shared_message(ds_data, MessageType::Dataspace)?;
+        Dataspace::parse(&resolved)?
+    } else {
+        Dataspace::parse(ds_data)?
+    };
     pos += ds_size;
 
     if version == 1 {

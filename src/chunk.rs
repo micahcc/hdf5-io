@@ -84,6 +84,11 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
     let total_size = total_elems * element_size as u64;
     let mut output = vec![0u8; total_size as usize];
 
+    // If no data has been allocated, return the zeroed output buffer
+    if address == u64::MAX {
+        return Ok(output);
+    }
+
     // Determine chunk index type and collect entries
     let entries = if layout_version == 3 {
         // Layout v3 always uses B-tree v1
@@ -240,6 +245,11 @@ pub fn read_chunked_slice<R: ReadAt + ?Sized>(
     let mut out_strides = vec![elem; ndims];
     for i in (0..ndims - 1).rev() {
         out_strides[i] = out_strides[i + 1] * count[i + 1] as usize;
+    }
+
+    // If no data has been allocated, return the zeroed output buffer
+    if address == u64::MAX {
+        return Ok(output);
     }
 
     // Collect chunk entries (reuse the same logic as read_chunked)
@@ -582,7 +592,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
     let idx_blk_elmts = Le::read_u8(reader, header_addr + 8).map_err(Error::Io)? as u64;
     let data_blk_min_elmts = Le::read_u8(reader, header_addr + 9).map_err(Error::Io)? as u64;
     let sup_blk_min_data_ptrs = Le::read_u8(reader, header_addr + 10).map_err(Error::Io)? as u64;
-    let _max_dblk_page_nelmts_bits = Le::read_u8(reader, header_addr + 11).map_err(Error::Io)?;
+    let max_dblk_page_nelmts_bits = Le::read_u8(reader, header_addr + 11).map_err(Error::Io)?;
 
     // 6 stats (each sizeof_lengths)
     let stats_start = header_addr + 12;
@@ -691,6 +701,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
             &chunks_per_dim,
             &mut entries,
             max_nelmts_bits,
+            max_dblk_page_nelmts_bits,
         )?;
         global_idx += dblk_nelmts;
     }
@@ -765,6 +776,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
                 &chunks_per_dim,
                 &mut entries,
                 max_nelmts_bits,
+                max_dblk_page_nelmts_bits,
             )?;
             global_idx += sblk_dblk_nelmts;
         }
@@ -820,6 +832,7 @@ fn read_ea_data_block_entries<R: ReadAt + ?Sized>(
     chunks_per_dim: &[u64],
     entries: &mut Vec<ChunkEntry>,
     max_nelmts_bits: u8,
+    max_dblk_page_nelmts_bits: u8,
 ) -> Result<()> {
     let o = size_of_offsets as u64;
 
@@ -841,11 +854,32 @@ fn read_ea_data_block_entries<R: ReadAt + ?Sized>(
     let prefix_size = 4 + 1 + 1 + o + arr_off_size;
     let elmts_start = dblk_addr + prefix_size;
 
+    // Paging: when max_dblk_page_nelmts_bits > 0 and the data block has more
+    // elements than one page, the block is divided into pages with a 4-byte
+    // checksum after each page's elements.
+    let page_nelmts = if max_dblk_page_nelmts_bits > 0
+        && dblk_nelmts > (1u64 << max_dblk_page_nelmts_bits)
+    {
+        1u64 << max_dblk_page_nelmts_bits
+    } else {
+        0 // no paging
+    };
+
     let count = dblk_nelmts.min(max_idx_set.saturating_sub(global_start_idx));
     for i in 0..count {
+        let offset = if page_nelmts > 0 {
+            let page_idx = i / page_nelmts;
+            let idx_in_page = i % page_nelmts;
+            let page_data_bytes = page_nelmts * elmt_size as u64;
+            // Each page: elements + 4-byte checksum
+            elmts_start + page_idx * (page_data_bytes + 4) + idx_in_page * elmt_size as u64
+        } else {
+            elmts_start + i * elmt_size as u64
+        };
+
         let entry = read_ea_element(
             reader,
-            elmts_start + i * elmt_size as u64,
+            offset,
             global_start_idx + i,
             has_filters,
             size_of_offsets,
