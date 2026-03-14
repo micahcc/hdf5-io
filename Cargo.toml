@@ -1,0 +1,15 @@
+[package]
+name = "hdf5-reader"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Pure Rust HDF5 file reader supporting superblock v2 and v3"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+thiserror = "2"
+# DEFLATE decompression for gzip/zlib filtered chunks
+flate2 = "1"
+
+[dev-dependencies]
+tempfile = "3"
