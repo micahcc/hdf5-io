@@ -22,9 +22,7 @@ pub fn lookup3(data: &[u8]) -> u32 {
 fn hashlittle2(data: &[u8], pc: u32, pb: u32) -> (u32, u32) {
     let len = data.len();
     // Initial value: 0xdeadbeef + len + pc
-    let mut a: u32 = 0xdeadbeef_u32
-        .wrapping_add(len as u32)
-        .wrapping_add(pc);
+    let mut a: u32 = 0xdeadbeef_u32.wrapping_add(len as u32).wrapping_add(pc);
     let mut b: u32 = a;
     let mut c: u32 = a.wrapping_add(pb);
 

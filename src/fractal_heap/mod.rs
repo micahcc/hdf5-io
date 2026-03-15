@@ -1,7 +1,9 @@
 use crate::checksum;
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 use crate::filters::FilterPipeline;
-use crate::io::{Le, ReadAt};
+use crate::io::Le;
+use crate::io::ReadAt;
 
 /// Fractal heap header magic: `FRHP`
 pub const FRHP_MAGIC: [u8; 4] = *b"FRHP";
@@ -107,42 +109,56 @@ impl FractalHeapHeader {
         let l = size_of_lengths as u64;
         let mut pos = addr + 14;
 
-        let next_huge_object_id = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let next_huge_object_id =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
         let huge_bt2_address = Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
         pos += o;
-        let free_space_in_managed = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let free_space_in_managed =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let free_space_manager_address = Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
+        let free_space_manager_address =
+            Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
         pos += o;
-        let managed_space_total = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let managed_space_total =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let managed_space_allocated = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let managed_space_allocated =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let managed_alloc_iterator_offset = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let managed_alloc_iterator_offset =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let managed_objects_count = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let managed_objects_count =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let huge_objects_total_size = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let huge_objects_total_size =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let huge_objects_count = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let huge_objects_count =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let tiny_objects_total_size = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let tiny_objects_total_size =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let tiny_objects_count = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let tiny_objects_count =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
 
         let table_width = Le::read_u16(reader, pos).map_err(Error::Io)?;
         pos += 2;
-        let starting_block_size = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let starting_block_size =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
-        let max_direct_block_size = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+        let max_direct_block_size =
+            Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
         pos += l;
         let max_heap_size_bits = Le::read_u16(reader, pos).map_err(Error::Io)?;
         pos += 2;
         let starting_root_rows = Le::read_u16(reader, pos).map_err(Error::Io)?;
         pos += 2;
-        let root_block_address = Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
+        let root_block_address =
+            Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
         pos += o;
         let current_root_rows = Le::read_u16(reader, pos).map_err(Error::Io)?;
         pos += 2;
@@ -157,7 +173,9 @@ impl FractalHeapHeader {
                 // Read and parse the encoded filter pipeline message
                 let fpl = io_filter_encoded_length as usize;
                 let mut filter_data = vec![0u8; fpl];
-                reader.read_exact_at(pos, &mut filter_data).map_err(Error::Io)?;
+                reader
+                    .read_exact_at(pos, &mut filter_data)
+                    .map_err(Error::Io)?;
                 let pipeline = FilterPipeline::parse(&filter_data)?;
                 pos += fpl as u64;
                 (Some(fsize), Some(mask), Some(pipeline))
@@ -238,17 +256,14 @@ impl FractalHeapHeader {
         if self.max_direct_block_size == 0 || self.starting_block_size == 0 {
             return 0;
         }
-        (self.max_direct_block_size / self.starting_block_size)
-            .trailing_zeros() as u32
-            + 2
+        (self.max_direct_block_size / self.starting_block_size).trailing_zeros() as u32 + 2
     }
 
     /// Number of rows in a child indirect block at a given row.
     ///
     /// C: `nrows = log2(row_block_size) - first_row_bits + 1` (H5HFdtable.c:237-251)
     pub fn child_indirect_nrows(&self, row: u32) -> u32 {
-        let first_row_bits =
-            (self.starting_block_size * self.table_width as u64).trailing_zeros();
+        let first_row_bits = (self.starting_block_size * self.table_width as u64).trailing_zeros();
         let log2_bs = self.block_size_for_row(row).trailing_zeros();
         log2_bs - first_row_bits + 1
     }
@@ -334,7 +349,9 @@ fn read_huge_object<R: ReadAt + ?Sized>(
             let _mem_length = read_var_le(&heap_id[1 + o + l + 4..], l);
 
             let mut compressed = vec![0u8; filtered_length as usize];
-            reader.read_exact_at(address, &mut compressed).map_err(Error::Io)?;
+            reader
+                .read_exact_at(address, &mut compressed)
+                .map_err(Error::Io)?;
 
             if let Some(pipeline) = &header.filter_pipeline {
                 if filter_mask == 0 {
@@ -353,7 +370,9 @@ fn read_huge_object<R: ReadAt + ?Sized>(
             let length = read_var_le(&heap_id[1 + o..], l);
 
             let mut data = vec![0u8; length as usize];
-            reader.read_exact_at(address, &mut data).map_err(Error::Io)?;
+            reader
+                .read_exact_at(address, &mut data)
+                .map_err(Error::Io)?;
             Ok(data)
         }
     } else {
@@ -397,7 +416,9 @@ fn read_huge_object<R: ReadAt + ?Sized>(
         match found {
             Some((address, length)) => {
                 let mut data = vec![0u8; length as usize];
-                reader.read_exact_at(address, &mut data).map_err(Error::Io)?;
+                reader
+                    .read_exact_at(address, &mut data)
+                    .map_err(Error::Io)?;
                 Ok(data)
             }
             None => Err(Error::InvalidFractalHeap {
@@ -443,8 +464,15 @@ fn read_managed_object_inner<R: ReadAt + ?Sized>(
         let filter_mask = header.io_filter_mask.unwrap_or(0);
         let block_size = header.starting_block_size;
         read_from_direct_block(
-            reader, header, root_addr, heap_offset, obj_length,
-            size_of_offsets, filtered_size, filter_mask, block_size,
+            reader,
+            header,
+            root_addr,
+            heap_offset,
+            obj_length,
+            size_of_offsets,
+            filtered_size,
+            filter_mask,
+            block_size,
         )
     } else {
         // Root is an indirect block — need to traverse
@@ -474,11 +502,7 @@ fn read_tiny_object(_header: &FractalHeapHeader, heap_id: &[u8]) -> Result<Vec<u
 }
 
 /// Decode a managed heap ID into (offset, length).
-fn decode_managed_heap_id(
-    heap_id: &[u8],
-    offset_bits: usize,
-    id_len: usize,
-) -> Result<(u64, u64)> {
+fn decode_managed_heap_id(heap_id: &[u8], offset_bits: usize, id_len: usize) -> Result<(u64, u64)> {
     // The heap ID starts with a flags byte. Bits 4-5 encode the type (0 = managed).
     // Bits 0-3 are reserved. The actual offset and length are packed into
     // bytes 1..id_len.
@@ -560,7 +584,10 @@ fn read_from_direct_block<R: ReadAt + ?Sized>(
         // Verify FHDB magic in decompressed data
         if decompressed.len() < 4 || decompressed[..4] != FHDB_MAGIC {
             return Err(Error::InvalidFractalHeap {
-                msg: format!("expected FHDB magic in decompressed block at {:#x}", block_addr),
+                msg: format!(
+                    "expected FHDB magic in decompressed block at {:#x}",
+                    block_addr
+                ),
             });
         }
 
@@ -571,7 +598,9 @@ fn read_from_direct_block<R: ReadAt + ?Sized>(
             return Err(Error::InvalidFractalHeap {
                 msg: format!(
                     "object at offset {} length {} exceeds decompressed block size {}",
-                    off, obj_length, decompressed.len()
+                    off,
+                    obj_length,
+                    decompressed.len()
                 ),
             });
         }
@@ -647,21 +676,19 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
         let is_direct = row < max_direct_rows;
 
         for _col in 0..width {
-            let child_addr =
-                Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
+            let child_addr = Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
             pos += size_of_offsets as u64;
 
             // For filtered direct blocks, read filtered_size and filter_mask
-            let (entry_filtered_size, entry_filter_mask) =
-                if is_direct && has_filters {
-                    let fsize = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
-                    pos += size_of_lengths as u64;
-                    let fmask = Le::read_u32(reader, pos).map_err(Error::Io)?;
-                    pos += 4;
-                    (Some(fsize), fmask)
-                } else {
-                    (None, 0)
-                };
+            let (entry_filtered_size, entry_filter_mask) = if is_direct && has_filters {
+                let fsize = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+                pos += size_of_lengths as u64;
+                let fmask = Le::read_u32(reader, pos).map_err(Error::Io)?;
+                pos += 4;
+                (Some(fsize), fmask)
+            } else {
+                (None, 0)
+            };
 
             let next_offset = current_heap_offset + block_size;
 
@@ -718,7 +745,11 @@ mod tests {
     use super::*;
 
     /// Build a FractalHeapHeader with just the fields needed for doubling-table math.
-    fn make_header(starting_block_size: u64, max_direct_block_size: u64, table_width: u16) -> FractalHeapHeader {
+    fn make_header(
+        starting_block_size: u64,
+        max_direct_block_size: u64,
+        table_width: u16,
+    ) -> FractalHeapHeader {
         FractalHeapHeader {
             heap_id_length: 7,
             io_filter_encoded_length: 0,
@@ -824,7 +855,8 @@ mod tests {
         assert!(needed > (h2.heap_id_length as usize) - 1);
 
         // With filters: need sizeof_addr + sizeof_size + 4 + sizeof_size
-        let needed_filtered = sizeof_addr as usize + sizeof_size as usize + 4 + sizeof_size as usize;
+        let needed_filtered =
+            sizeof_addr as usize + sizeof_size as usize + 4 + sizeof_size as usize;
         // id_len=25 → 25-1=24 < 28 → indirect
         let h3 = FractalHeapHeader {
             heap_id_length: 25,

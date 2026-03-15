@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// HDF5 datatype class IDs (from the on-disk encoding).
 ///
@@ -134,10 +135,7 @@ pub enum Datatype {
         char_set: Option<CharacterSet>,
     },
     /// Opaque type.
-    Opaque {
-        size: u32,
-        tag: String,
-    },
+    Opaque { size: u32, tag: String },
     /// Bitfield type.
     BitField {
         size: u32,
@@ -146,22 +144,14 @@ pub enum Datatype {
         bit_precision: u16,
     },
     /// Reference type.
-    Reference {
-        ref_type: ReferenceType,
-    },
+    Reference { ref_type: ReferenceType },
     /// Time type (rarely used).
-    Time {
-        size: u32,
-        bit_precision: u16,
-    },
+    Time { size: u32, bit_precision: u16 },
     /// Complex number type (HDF5 2.0+).
     ///
     /// On-disk: two consecutive values of the base floating-point type
     /// (real part, then imaginary part). `size` = 2 * base element size.
-    Complex {
-        size: u32,
-        base: Box<Datatype>,
-    },
+    Complex { size: u32, base: Box<Datatype> },
 }
 
 /// A member of a compound datatype.
@@ -295,7 +285,7 @@ impl Datatype {
             _ => {
                 return Err(Error::InvalidDatatype {
                     msg: "invalid floating-point byte order".into(),
-                })
+                });
             }
         };
 
@@ -328,7 +318,7 @@ impl Datatype {
             p => {
                 return Err(Error::InvalidDatatype {
                     msg: format!("unknown string padding type {}", p),
-                })
+                });
             }
         };
         let char_set = match (class_bits >> 4) & 0x0F {
@@ -337,7 +327,7 @@ impl Datatype {
             c => {
                 return Err(Error::InvalidDatatype {
                     msg: format!("unknown string charset {}", c),
-                })
+                });
             }
         };
 
@@ -477,11 +467,11 @@ impl Datatype {
         let size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
         let props_size = match class_id {
-            0 => 4, // FixedPoint: bit_offset(2) + bit_precision(2)
+            0 => 4,  // FixedPoint: bit_offset(2) + bit_precision(2)
             1 => 12, // FloatingPoint
-            2 => 2, // Time
-            3 => 0, // String (all info in class_bits)
-            4 => 4, // BitField
+            2 => 2,  // Time
+            3 => 0,  // String (all info in class_bits)
+            4 => 4,  // BitField
             5 => {
                 // Opaque: tag (class_bits & 0xFF) padded to 8
                 let tag_len = (class_bits & 0xFF) as usize;
@@ -537,9 +527,8 @@ impl Datatype {
                 let props = &data[8..];
                 // Base type
                 let base_encoded = Self::encoded_size(props)?;
-                let base_elem_size = u32::from_le_bytes([
-                    props[4], props[5], props[6], props[7],
-                ]) as usize;
+                let base_elem_size =
+                    u32::from_le_bytes([props[4], props[5], props[6], props[7]]) as usize;
                 let mut pos = base_encoded;
                 // Member names
                 for _ in 0..nmembers {
@@ -669,12 +658,8 @@ impl Datatype {
         }
         let mut dimensions = Vec::with_capacity(ndims);
         for _ in 0..ndims {
-            let dim = u32::from_le_bytes([
-                props[pos],
-                props[pos + 1],
-                props[pos + 2],
-                props[pos + 3],
-            ]);
+            let dim =
+                u32::from_le_bytes([props[pos], props[pos + 1], props[pos + 2], props[pos + 3]]);
             dimensions.push(dim);
             pos += 4;
         }
@@ -797,7 +782,7 @@ impl Datatype {
             r => {
                 return Err(Error::InvalidDatatype {
                     msg: format!("unknown reference type {}", r),
-                })
+                });
             }
         };
         Ok(Datatype::Reference { ref_type })
@@ -943,9 +928,7 @@ mod tests {
         let dt = Datatype::parse(&msg).unwrap();
         match dt {
             Datatype::String {
-                padding,
-                char_set,
-                ..
+                padding, char_set, ..
             } => {
                 assert_eq!(padding, StringPadding::NullPad);
                 assert_eq!(char_set, CharacterSet::Utf8);
@@ -1153,7 +1136,11 @@ mod tests {
                 assert_eq!(*size, 16);
                 assert_eq!(base.element_size(), 8);
                 match base.as_ref() {
-                    Datatype::FloatingPoint { byte_order, mantissa_size, .. } => {
+                    Datatype::FloatingPoint {
+                        byte_order,
+                        mantissa_size,
+                        ..
+                    } => {
                         assert_eq!(*byte_order, ByteOrder::LittleEndian);
                         assert_eq!(*mantissa_size, 52);
                     }

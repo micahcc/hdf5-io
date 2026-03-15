@@ -1,9 +1,13 @@
 pub mod messages;
 
+use messages::Message;
+use messages::MessageType;
+
 use crate::checksum;
-use crate::error::{Error, Result};
-use crate::io::{Le, ReadAt};
-use messages::{Message, MessageType};
+use crate::error::Error;
+use crate::error::Result;
+use crate::io::Le;
+use crate::io::ReadAt;
 
 /// Magic bytes for object header v2: `OHDR`
 pub const OHDR_MAGIC: [u8; 4] = *b"OHDR";
@@ -55,10 +59,7 @@ impl ObjectHeader {
         reader.read_exact_at(addr, &mut magic).map_err(Error::Io)?;
         if magic != OHDR_MAGIC {
             return Err(Error::InvalidObjectHeader {
-                msg: format!(
-                    "expected OHDR magic at {:#x}, got {:?}",
-                    addr, magic
-                ),
+                msg: format!("expected OHDR magic at {:#x}, got {:?}", addr, magic),
             });
         }
 

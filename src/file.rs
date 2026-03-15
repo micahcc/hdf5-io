@@ -1,14 +1,18 @@
-use crate::btree2::{self, BTree2Header};
+use crate::btree2::BTree2Header;
+use crate::btree2::{self};
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 use crate::filters::FilterPipeline;
-use crate::fractal_heap::{self, FractalHeapHeader};
+use crate::fractal_heap::FractalHeapHeader;
+use crate::fractal_heap::{self};
 use crate::io::ReadAt;
 use crate::layout::DataLayout;
-use crate::link::{Link, LinkTarget};
-use crate::object_header::messages::MessageType;
+use crate::link::Link;
+use crate::link::LinkTarget;
 use crate::object_header::ObjectHeader;
+use crate::object_header::messages::MessageType;
 use crate::superblock::Superblock;
 
 /// An opened HDF5 file.
@@ -134,7 +138,7 @@ impl<R: ReadAt + ?Sized> File<R> {
                         Node::Dataset(_) => {
                             return Err(Error::NotAGroup {
                                 path: part.to_string(),
-                            })
+                            });
                         }
                     }
                 }
@@ -162,11 +166,7 @@ impl<R: ReadAt + ?Sized> File<R> {
     /// When a message has the "shared" flag set, its body is a shared message
     /// record pointing elsewhere — typically a committed datatype. This reads
     /// the object header at the target address and extracts the real message.
-    fn resolve_shared_message(
-        &self,
-        data: &[u8],
-        expected_type: MessageType,
-    ) -> Result<Vec<u8>> {
+    fn resolve_shared_message(&self, data: &[u8], expected_type: MessageType) -> Result<Vec<u8>> {
         if data.is_empty() {
             return Err(Error::InvalidObjectHeader {
                 msg: "empty shared message record".into(),
@@ -517,8 +517,7 @@ impl<'a, R: ReadAt + ?Sized> Group<'a, R> {
                     .map(|(_order, id)| id)
             } else {
                 // Type 5 record: hash (4) + heap_id
-                btree2::parse_link_name_record(&record.data, heap_id_len)
-                    .map(|(_hash, id)| id)
+                btree2::parse_link_name_record(&record.data, heap_id_len).map(|(_hash, id)| id)
             };
             if let Some(heap_id) = heap_id {
                 let link_data = fractal_heap::read_managed_object(
@@ -551,10 +550,9 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::Datatype {
                 if msg.is_shared() {
-                    let resolved = self.file.resolve_shared_message(
-                        &msg.data,
-                        MessageType::Datatype,
-                    )?;
+                    let resolved = self
+                        .file
+                        .resolve_shared_message(&msg.data, MessageType::Datatype)?;
                     return Datatype::parse(&resolved);
                 }
                 return Datatype::parse(&msg.data);
@@ -570,10 +568,9 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::Dataspace {
                 if msg.is_shared() {
-                    let resolved = self.file.resolve_shared_message(
-                        &msg.data,
-                        MessageType::Dataspace,
-                    )?;
+                    let resolved = self
+                        .file
+                        .resolve_shared_message(&msg.data, MessageType::Dataspace)?;
                     return Dataspace::parse(&resolved);
                 }
                 return Dataspace::parse(&msg.data);
@@ -610,10 +607,8 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::FilterPipeline {
                 let data = if msg.is_shared() {
-                    self.file.resolve_shared_message(
-                        &msg.data,
-                        MessageType::FilterPipeline,
-                    )?
+                    self.file
+                        .resolve_shared_message(&msg.data, MessageType::FilterPipeline)?
                 } else {
                     msg.data.clone()
                 };
@@ -628,10 +623,8 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::FillValue {
                 let data = if msg.is_shared() {
-                    self.file.resolve_shared_message(
-                        &msg.data,
-                        MessageType::FillValue,
-                    )?
+                    self.file
+                        .resolve_shared_message(&msg.data, MessageType::FillValue)?
                 } else {
                     msg.data.clone()
                 };
@@ -769,21 +762,36 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
                 } else {
                     data
                 };
-                Ok(extract_hyperslab(&raw, dataset_dims, start, count, element_size))
+                Ok(extract_hyperslab(
+                    &raw,
+                    dataset_dims,
+                    start,
+                    count,
+                    element_size,
+                ))
             }
             DataLayout::Contiguous { address, size } => {
                 let raw = if address == u64::MAX {
                     vec![0u8; size as usize]
                 } else {
                     let mut buf = vec![0u8; size as usize];
-                    self.file.reader.read_exact_at(address, &mut buf).map_err(Error::Io)?;
+                    self.file
+                        .reader
+                        .read_exact_at(address, &mut buf)
+                        .map_err(Error::Io)?;
                     if let Some(pipeline) = &filters {
                         pipeline.decompress(buf)?
                     } else {
                         buf
                     }
                 };
-                Ok(extract_hyperslab(&raw, dataset_dims, start, count, element_size))
+                Ok(extract_hyperslab(
+                    &raw,
+                    dataset_dims,
+                    start,
+                    count,
+                    element_size,
+                ))
             }
             DataLayout::Chunked { .. } => {
                 let max_dims = dspace.max_dimensions();
@@ -1128,13 +1136,8 @@ fn read_dense_attrs_from_btree<R: ReadAt + ?Sized>(
             btree2::parse_attribute_name_record(&record.data, heap_id_len)
         };
         if let Some(heap_id) = heap_id {
-            let attr_data = fractal_heap::read_managed_object(
-                &*file.reader,
-                &fheap,
-                &heap_id,
-                so,
-                sl,
-            )?;
+            let attr_data =
+                fractal_heap::read_managed_object(&*file.reader, &fheap, &heap_id, so, sl)?;
             if let Ok(attr) = parse_attribute_message(&attr_data, file) {
                 attrs.push(attr);
             }
@@ -1183,10 +1186,7 @@ fn parse_dense_attributes_by_creation_order<R: ReadAt + ?Sized>(
 /// Dataspace message
 /// Value
 /// ```
-fn parse_attribute_message<R: ReadAt + ?Sized>(
-    data: &[u8],
-    file: &File<R>,
-) -> Result<Attribute> {
+fn parse_attribute_message<R: ReadAt + ?Sized>(data: &[u8], file: &File<R>) -> Result<Attribute> {
     if data.len() < 6 {
         return Err(Error::InvalidObjectHeader {
             msg: "attribute message too short".into(),
@@ -1205,7 +1205,7 @@ fn parse_attribute_message<R: ReadAt + ?Sized>(
         _ => {
             return Err(Error::InvalidObjectHeader {
                 msg: format!("unsupported attribute message version {}", version),
-            })
+            });
         }
     };
 
@@ -1298,7 +1298,11 @@ fn extract_hyperslab(
 
     // Number of contiguous rows (innermost dim)
     let inner_count = count[ndims - 1] as usize * element_size;
-    let nrows: usize = count[..ndims - 1].iter().map(|&c| c as usize).product::<usize>().max(1);
+    let nrows: usize = count[..ndims - 1]
+        .iter()
+        .map(|&c| c as usize)
+        .product::<usize>()
+        .max(1);
 
     for row in 0..nrows {
         let mut remaining = row;
@@ -1331,11 +1335,18 @@ fn swap_to_native(dt: &Datatype, data: &mut [u8]) {
     use crate::datatype::ByteOrder;
 
     let (elem_size, order) = match dt {
-        Datatype::FixedPoint { size, byte_order, .. } => (*size as usize, *byte_order),
-        Datatype::FloatingPoint { size, byte_order, .. } => (*size as usize, *byte_order),
+        Datatype::FixedPoint {
+            size, byte_order, ..
+        } => (*size as usize, *byte_order),
+        Datatype::FloatingPoint {
+            size, byte_order, ..
+        } => (*size as usize, *byte_order),
         Datatype::Complex { base, .. } => {
             // Swap each component (real, imaginary) using the base float type
-            if let Datatype::FloatingPoint { size: base_size, .. } = base.as_ref() {
+            if let Datatype::FloatingPoint {
+                size: base_size, ..
+            } = base.as_ref()
+            {
                 let bs = *base_size as usize;
                 for chunk in data.chunks_exact_mut(bs) {
                     // Delegate to the base type for each component

@@ -1,8 +1,11 @@
 use crate::checksum;
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 use crate::filters::FilterPipeline;
-use crate::io::{Le, ReadAt};
-use crate::layout::{ChunkIndexType, DataLayout};
+use crate::io::Le;
+use crate::io::ReadAt;
+use crate::layout::ChunkIndexType;
+use crate::layout::DataLayout;
 
 /// A single chunk's location and metadata.
 #[derive(Debug, Clone)]
@@ -35,8 +38,15 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
     size_of_lengths: u8,
     max_dims: Option<&[u64]>,
 ) -> Result<Vec<u8>> {
-    let (chunk_dims, address, chunk_index_type, _chunk_flags, layout_version,
-         single_filtered_size, single_filter_mask) = match layout {
+    let (
+        chunk_dims,
+        address,
+        chunk_index_type,
+        _chunk_flags,
+        layout_version,
+        single_filtered_size,
+        single_filter_mask,
+    ) = match layout {
         DataLayout::Chunked {
             chunk_dims,
             address,
@@ -58,7 +68,7 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
         _ => {
             return Err(Error::InvalidLayout {
                 msg: "expected chunked layout".into(),
-            })
+            });
         }
     };
 
@@ -104,25 +114,17 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
     } else {
         let idx_type = chunk_index_type.unwrap_or(ChunkIndexType::SingleChunk);
         match idx_type {
-        ChunkIndexType::SingleChunk => {
-            read_single_chunk_entries(
+            ChunkIndexType::SingleChunk => read_single_chunk_entries(
                 address,
                 chunk_byte_size,
                 single_filtered_size,
                 single_filter_mask,
                 ndims,
-            )?
-        }
-        ChunkIndexType::Implicit => {
-            read_implicit_chunk_entries(
-                address,
-                dataset_dims,
-                chunk_dims,
-                chunk_byte_size,
-            )?
-        }
-        ChunkIndexType::FixedArray => {
-            read_fixed_array_entries(
+            )?,
+            ChunkIndexType::Implicit => {
+                read_implicit_chunk_entries(address, dataset_dims, chunk_dims, chunk_byte_size)?
+            }
+            ChunkIndexType::FixedArray => read_fixed_array_entries(
                 reader,
                 address,
                 dataset_dims,
@@ -130,10 +132,8 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
                 filters.is_some(),
                 size_of_offsets,
                 size_of_lengths,
-            )?
-        }
-        ChunkIndexType::ExtensibleArray => {
-            read_extensible_array_entries(
+            )?,
+            ChunkIndexType::ExtensibleArray => read_extensible_array_entries(
                 reader,
                 address,
                 dataset_dims,
@@ -141,10 +141,8 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
                 filters.is_some(),
                 size_of_offsets,
                 size_of_lengths,
-            )?
-        }
-        ChunkIndexType::BTreeV2 => {
-            read_btree_v2_chunk_entries(
+            )?,
+            ChunkIndexType::BTreeV2 => read_btree_v2_chunk_entries(
                 reader,
                 address,
                 dataset_dims,
@@ -154,9 +152,8 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
                 size_of_offsets,
                 size_of_lengths,
                 max_dims,
-            )?
+            )?,
         }
-    }
     };
 
     // Read each chunk and place it into the output buffer
@@ -214,14 +211,38 @@ pub fn read_chunked_slice<R: ReadAt + ?Sized>(
     start: &[u64],
     count: &[u64],
 ) -> Result<Vec<u8>> {
-    let (chunk_dims, address, chunk_index_type, _chunk_flags, layout_version,
-         single_filtered_size, single_filter_mask) = match layout {
+    let (
+        chunk_dims,
+        address,
+        chunk_index_type,
+        _chunk_flags,
+        layout_version,
+        single_filtered_size,
+        single_filter_mask,
+    ) = match layout {
         DataLayout::Chunked {
-            chunk_dims, address, chunk_index_type, chunk_flags,
-            layout_version, single_chunk_filtered_size, single_chunk_filter_mask, ..
-        } => (chunk_dims, *address, chunk_index_type, *chunk_flags, *layout_version,
-              *single_chunk_filtered_size, *single_chunk_filter_mask),
-        _ => return Err(Error::InvalidLayout { msg: "expected chunked layout".into() }),
+            chunk_dims,
+            address,
+            chunk_index_type,
+            chunk_flags,
+            layout_version,
+            single_chunk_filtered_size,
+            single_chunk_filter_mask,
+            ..
+        } => (
+            chunk_dims,
+            *address,
+            chunk_index_type,
+            *chunk_flags,
+            *layout_version,
+            *single_chunk_filtered_size,
+            *single_chunk_filter_mask,
+        ),
+        _ => {
+            return Err(Error::InvalidLayout {
+                msg: "expected chunked layout".into(),
+            });
+        }
     };
 
     let ndims = dataset_dims.len();
@@ -255,15 +276,56 @@ pub fn read_chunked_slice<R: ReadAt + ?Sized>(
     // Collect chunk entries (reuse the same logic as read_chunked)
     let entries = if layout_version == 3 {
         let v3_ndims = ndims + 1;
-        read_btree_v1_entries(reader, address, dataset_dims, chunk_dims, v3_ndims, size_of_offsets)?
+        read_btree_v1_entries(
+            reader,
+            address,
+            dataset_dims,
+            chunk_dims,
+            v3_ndims,
+            size_of_offsets,
+        )?
     } else {
         let idx_type = chunk_index_type.unwrap_or(ChunkIndexType::SingleChunk);
         match idx_type {
-            ChunkIndexType::SingleChunk => read_single_chunk_entries(address, chunk_byte_size, single_filtered_size, single_filter_mask, ndims)?,
-            ChunkIndexType::Implicit => read_implicit_chunk_entries(address, dataset_dims, chunk_dims, chunk_byte_size)?,
-            ChunkIndexType::FixedArray => read_fixed_array_entries(reader, address, dataset_dims, chunk_dims, filters.is_some(), size_of_offsets, size_of_lengths)?,
-            ChunkIndexType::ExtensibleArray => read_extensible_array_entries(reader, address, dataset_dims, chunk_dims, filters.is_some(), size_of_offsets, size_of_lengths)?,
-            ChunkIndexType::BTreeV2 => read_btree_v2_chunk_entries(reader, address, dataset_dims, chunk_dims, element_size, filters.is_some(), size_of_offsets, size_of_lengths, max_dims)?,
+            ChunkIndexType::SingleChunk => read_single_chunk_entries(
+                address,
+                chunk_byte_size,
+                single_filtered_size,
+                single_filter_mask,
+                ndims,
+            )?,
+            ChunkIndexType::Implicit => {
+                read_implicit_chunk_entries(address, dataset_dims, chunk_dims, chunk_byte_size)?
+            }
+            ChunkIndexType::FixedArray => read_fixed_array_entries(
+                reader,
+                address,
+                dataset_dims,
+                chunk_dims,
+                filters.is_some(),
+                size_of_offsets,
+                size_of_lengths,
+            )?,
+            ChunkIndexType::ExtensibleArray => read_extensible_array_entries(
+                reader,
+                address,
+                dataset_dims,
+                chunk_dims,
+                filters.is_some(),
+                size_of_offsets,
+                size_of_lengths,
+            )?,
+            ChunkIndexType::BTreeV2 => read_btree_v2_chunk_entries(
+                reader,
+                address,
+                dataset_dims,
+                chunk_dims,
+                element_size,
+                filters.is_some(),
+                size_of_offsets,
+                size_of_lengths,
+                max_dims,
+            )?,
         }
     };
 
@@ -290,9 +352,15 @@ pub fn read_chunked_slice<R: ReadAt + ?Sized>(
         }
 
         // Read and decompress chunk
-        let read_size = if entry.filtered_size > 0 { entry.filtered_size as usize } else { chunk_byte_size as usize };
+        let read_size = if entry.filtered_size > 0 {
+            entry.filtered_size as usize
+        } else {
+            chunk_byte_size as usize
+        };
         let mut chunk_data = vec![0u8; read_size];
-        reader.read_exact_at(entry.address, &mut chunk_data).map_err(Error::Io)?;
+        reader
+            .read_exact_at(entry.address, &mut chunk_data)
+            .map_err(Error::Io)?;
         if let Some(pipeline) = filters {
             if entry.filter_mask == 0 {
                 chunk_data = pipeline.decompress(chunk_data)?;
@@ -318,7 +386,11 @@ pub fn read_chunked_slice<R: ReadAt + ?Sized>(
 
         // Copy the overlap region from chunk to output, row by row
         let inner_count = ov_count[ndims - 1] as usize * elem;
-        let nrows: usize = ov_count[..ndims - 1].iter().map(|&c| c as usize).product::<usize>().max(1);
+        let nrows: usize = ov_count[..ndims - 1]
+            .iter()
+            .map(|&c| c as usize)
+            .product::<usize>()
+            .max(1);
 
         for row in 0..nrows {
             let mut remaining = row;
@@ -327,17 +399,24 @@ pub fn read_chunked_slice<R: ReadAt + ?Sized>(
 
             for i in 0..ndims - 1 {
                 let rows_below: usize = ov_count[i + 1..ndims - 1]
-                    .iter().map(|&c| c as usize).product::<usize>().max(1);
+                    .iter()
+                    .map(|&c| c as usize)
+                    .product::<usize>()
+                    .max(1);
                 let idx = remaining / rows_below;
                 remaining %= rows_below;
                 // Source offset within chunk
-                src_off += (ov_start[i] - entry.scaled[i] * chunk_dims[i] as u64) as usize * ch_strides[i]
+                src_off += (ov_start[i] - entry.scaled[i] * chunk_dims[i] as u64) as usize
+                    * ch_strides[i]
                     + idx * ch_strides[i];
                 // Dest offset within output
-                dst_off += (ov_start[i] - start[i]) as usize * out_strides[i]
-                    + idx * out_strides[i];
+                dst_off +=
+                    (ov_start[i] - start[i]) as usize * out_strides[i] + idx * out_strides[i];
             }
-            src_off += (ov_start[ndims - 1] - entry.scaled[ndims - 1] * chunk_dims[ndims - 1] as u64) as usize * elem;
+            src_off += (ov_start[ndims - 1]
+                - entry.scaled[ndims - 1] * chunk_dims[ndims - 1] as u64)
+                as usize
+                * elem;
             dst_off += (ov_start[ndims - 1] - start[ndims - 1]) as usize * elem;
 
             if src_off + inner_count <= chunk_data.len() && dst_off + inner_count <= output.len() {
@@ -433,10 +512,7 @@ fn read_fixed_array_entries<R: ReadAt + ?Sized>(
         .map_err(Error::Io)?;
     if magic != FAHD_MAGIC {
         return Err(Error::InvalidLayout {
-            msg: format!(
-                "expected FAHD magic at {:#x}, got {:?}",
-                header_addr, magic
-            ),
+            msg: format!("expected FAHD magic at {:#x}, got {:?}", header_addr, magic),
         });
     }
 
@@ -444,8 +520,7 @@ fn read_fixed_array_entries<R: ReadAt + ?Sized>(
     let _client_id = Le::read_u8(reader, header_addr + 5).map_err(Error::Io)?;
     let entry_size = Le::read_u8(reader, header_addr + 6).map_err(Error::Io)?;
     let _max_dblk_page_bits = Le::read_u8(reader, header_addr + 7).map_err(Error::Io)?;
-    let nelmts =
-        Le::read_length(reader, header_addr + 8, size_of_lengths).map_err(Error::Io)?;
+    let nelmts = Le::read_length(reader, header_addr + 8, size_of_lengths).map_err(Error::Io)?;
     let dblk_addr =
         Le::read_offset(reader, header_addr + 8 + l, size_of_offsets).map_err(Error::Io)?;
 
@@ -455,8 +530,7 @@ fn read_fixed_array_entries<R: ReadAt + ?Sized>(
     reader
         .read_exact_at(header_addr, &mut hdr_data)
         .map_err(Error::Io)?;
-    let stored_cksum =
-        Le::read_u32(reader, header_addr + hdr_size as u64).map_err(Error::Io)?;
+    let stored_cksum = Le::read_u32(reader, header_addr + hdr_size as u64).map_err(Error::Io)?;
     let computed = checksum::lookup3(&hdr_data);
     if computed != stored_cksum {
         return Err(Error::ChecksumMismatch {
@@ -506,12 +580,11 @@ fn read_fixed_array_entries<R: ReadAt + ?Sized>(
 
         if has_filters {
             // Filtered entry: address(O) + chunk_nbytes(entry_size - O - 4) + filter_mask(4)
-            let addr =
-                Le::read_offset(reader, entry_off, size_of_offsets).map_err(Error::Io)?;
+            let addr = Le::read_offset(reader, entry_off, size_of_offsets).map_err(Error::Io)?;
             let nbytes_size = es - size_of_offsets as usize - 4;
             let nbytes = read_var_le(reader, entry_off + o, nbytes_size)?;
-            let fmask = Le::read_u32(reader, entry_off + o + nbytes_size as u64)
-                .map_err(Error::Io)?;
+            let fmask =
+                Le::read_u32(reader, entry_off + o + nbytes_size as u64).map_err(Error::Io)?;
 
             let scaled = linear_to_scaled(i, &chunks_per_dim);
             entries.push(ChunkEntry {
@@ -522,11 +595,9 @@ fn read_fixed_array_entries<R: ReadAt + ?Sized>(
             });
         } else {
             // Non-filtered entry: just address(O)
-            let addr =
-                Le::read_offset(reader, entry_off, size_of_offsets).map_err(Error::Io)?;
-            let _chunk_byte_size: u64 =
-                chunk_dims.iter().map(|&d| d as u64).product::<u64>()
-                    * (es as u64 / size_of_offsets as u64).max(1); // approximate
+            let addr = Le::read_offset(reader, entry_off, size_of_offsets).map_err(Error::Io)?;
+            let _chunk_byte_size: u64 = chunk_dims.iter().map(|&d| d as u64).product::<u64>()
+                * (es as u64 / size_of_offsets as u64).max(1); // approximate
 
             let scaled = linear_to_scaled(i, &chunks_per_dim);
             // For non-filtered, the on-disk size equals the uncompressed chunk size.
@@ -578,10 +649,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
         .map_err(Error::Io)?;
     if magic != EAHD_MAGIC {
         return Err(Error::InvalidLayout {
-            msg: format!(
-                "expected EAHD magic at {:#x}, got {:?}",
-                header_addr, magic
-            ),
+            msg: format!("expected EAHD magic at {:#x}, got {:?}", header_addr, magic),
         });
     }
 
@@ -596,8 +664,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
 
     // 6 stats (each sizeof_lengths)
     let stats_start = header_addr + 12;
-    let _nsuper_blks =
-        Le::read_length(reader, stats_start, size_of_lengths).map_err(Error::Io)?;
+    let _nsuper_blks = Le::read_length(reader, stats_start, size_of_lengths).map_err(Error::Io)?;
     let _super_blk_size =
         Le::read_length(reader, stats_start + l, size_of_lengths).map_err(Error::Io)?;
     let _ndata_blks =
@@ -752,12 +819,8 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
             if global_idx >= max_idx_set {
                 break;
             }
-            let db_addr = Le::read_offset(
-                reader,
-                sb_dblk_addrs_start + d * o,
-                size_of_offsets,
-            )
-            .map_err(Error::Io)?;
+            let db_addr = Le::read_offset(reader, sb_dblk_addrs_start + d * o, size_of_offsets)
+                .map_err(Error::Io)?;
 
             if db_addr == u64::MAX {
                 global_idx += sblk_dblk_nelmts;
@@ -803,8 +866,7 @@ fn read_ea_element<R: ReadAt + ?Sized>(
     let (filtered_size, filter_mask) = if has_filters {
         let nbytes_size = elmt_size - size_of_offsets as usize - 4;
         let nbytes = read_var_le(reader, offset + o, nbytes_size)?;
-        let fmask =
-            Le::read_u32(reader, offset + o + nbytes_size as u64).map_err(Error::Io)?;
+        let fmask = Le::read_u32(reader, offset + o + nbytes_size as u64).map_err(Error::Io)?;
         (nbytes, fmask)
     } else {
         (0, 0) // unfiltered: size determined by caller
@@ -857,13 +919,12 @@ fn read_ea_data_block_entries<R: ReadAt + ?Sized>(
     // Paging: when max_dblk_page_nelmts_bits > 0 and the data block has more
     // elements than one page, the block is divided into pages with a 4-byte
     // checksum after each page's elements.
-    let page_nelmts = if max_dblk_page_nelmts_bits > 0
-        && dblk_nelmts > (1u64 << max_dblk_page_nelmts_bits)
-    {
-        1u64 << max_dblk_page_nelmts_bits
-    } else {
-        0 // no paging
-    };
+    let page_nelmts =
+        if max_dblk_page_nelmts_bits > 0 && dblk_nelmts > (1u64 << max_dblk_page_nelmts_bits) {
+            1u64 << max_dblk_page_nelmts_bits
+        } else {
+            0 // no paging
+        };
 
     let count = dblk_nelmts.min(max_idx_set.saturating_sub(global_start_idx));
     for i in 0..count {
@@ -930,17 +991,17 @@ fn read_btree_v1_entries<R: ReadAt + ?Sized>(
         .map_err(Error::Io)?;
     if magic != TREE_MAGIC {
         return Err(Error::InvalidLayout {
-            msg: format!(
-                "expected TREE magic at {:#x}, got {:?}",
-                node_addr, magic
-            ),
+            msg: format!("expected TREE magic at {:#x}, got {:?}", node_addr, magic),
         });
     }
 
     let node_type = Le::read_u8(reader, node_addr + 4).map_err(Error::Io)?;
     if node_type != 1 {
         return Err(Error::InvalidLayout {
-            msg: format!("expected B-tree v1 node type 1 (chunked), got {}", node_type),
+            msg: format!(
+                "expected B-tree v1 node type 1 (chunked), got {}",
+                node_type
+            ),
         });
     }
     let node_level = Le::read_u8(reader, node_addr + 5).map_err(Error::Io)?;
@@ -1033,15 +1094,16 @@ fn read_btree_v2_chunk_entries<R: ReadAt + ?Sized>(
     size_of_lengths: u8,
     _max_dims: Option<&[u64]>,
 ) -> Result<Vec<ChunkEntry>> {
-    use crate::btree2::{self, BTree2Header};
+    use crate::btree2::BTree2Header;
+    use crate::btree2::{self};
 
     let ndims = dataset_dims.len();
 
     // Compute chunk_size_len for filtered records using HDF5 formula:
     // chunk_size_len = 1 + (floor(log2(chunk_size)) + 8) / 8, capped at 8
     // (H5Dbtree2.c H5D_BT2_COMPUTE_CHUNK_SIZE_LEN)
-    let chunk_byte_size: u64 = chunk_dims.iter().map(|&d| d as u64).product::<u64>()
-        * element_size as u64;
+    let chunk_byte_size: u64 =
+        chunk_dims.iter().map(|&d| d as u64).product::<u64>() * element_size as u64;
     let chunk_size_len = if has_filters {
         if chunk_byte_size == 0 {
             1
@@ -1166,8 +1228,7 @@ fn copy_chunk_to_output(
         let copy_len = actual_dims[0] as usize * element_size;
         let src_len = copy_len.min(chunk_data.len());
         if dst_start + src_len <= output.len() {
-            output[dst_start..dst_start + src_len]
-                .copy_from_slice(&chunk_data[..src_len]);
+            output[dst_start..dst_start + src_len].copy_from_slice(&chunk_data[..src_len]);
         }
         return;
     }
@@ -1189,7 +1250,10 @@ fn copy_chunk_to_output(
     }
 
     // Number of "rows" to copy (product of all dims except the innermost)
-    let nrows: usize = actual_dims[..ndims - 1].iter().map(|&d| d as usize).product();
+    let nrows: usize = actual_dims[..ndims - 1]
+        .iter()
+        .map(|&d| d as usize)
+        .product();
 
     for row in 0..nrows {
         // Convert row index to per-dimension indices (excluding innermost)
@@ -1213,9 +1277,7 @@ fn copy_chunk_to_output(
         // Add the innermost dimension's base offset
         dst_offset += scaled[ndims - 1] as usize * chunk_dims[ndims - 1] as usize * element_size;
 
-        if src_offset + inner_len <= chunk_data.len()
-            && dst_offset + inner_len <= output.len()
-        {
+        if src_offset + inner_len <= chunk_data.len() && dst_offset + inner_len <= output.len() {
             output[dst_offset..dst_offset + inner_len]
                 .copy_from_slice(&chunk_data[src_offset..src_offset + inner_len]);
         }
@@ -1301,9 +1363,23 @@ mod tests {
         let mut output = vec![0u8; 6];
 
         // Chunk 0: full, 4 bytes
-        copy_chunk_to_output(&[10, 20, 30, 40], &[0], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[10, 20, 30, 40],
+            &[0],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
         // Chunk 1: edge, only 2 of 4 elements matter, but chunk data is still 4 bytes
-        copy_chunk_to_output(&[50, 60, 0, 0], &[1], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[50, 60, 0, 0],
+            &[1],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
 
         assert_eq!(output, vec![10, 20, 30, 40, 50, 60]);
     }
@@ -1326,16 +1402,44 @@ mod tests {
         let mut output = vec![0u8; 24]; // 4*6
 
         // Chunk (0,0): rows 0-1, cols 0-2 → [1,2,3, 7,8,9]
-        copy_chunk_to_output(&[1, 2, 3, 7, 8, 9], &[0, 0], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[1, 2, 3, 7, 8, 9],
+            &[0, 0],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
 
         // Chunk (0,1): rows 0-1, cols 3-5 → [4,5,6, 10,11,12]
-        copy_chunk_to_output(&[4, 5, 6, 10, 11, 12], &[0, 1], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[4, 5, 6, 10, 11, 12],
+            &[0, 1],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
 
         // Chunk (1,0): rows 2-3, cols 0-2 → [13,14,15, 19,20,21]
-        copy_chunk_to_output(&[13, 14, 15, 19, 20, 21], &[1, 0], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[13, 14, 15, 19, 20, 21],
+            &[1, 0],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
 
         // Chunk (1,1): rows 2-3, cols 3-5 → [16,17,18, 22,23,24]
-        copy_chunk_to_output(&[16, 17, 18, 22, 23, 24], &[1, 1], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[16, 17, 18, 22, 23, 24],
+            &[1, 1],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
 
         // Expected: row-major [1..24]
         let expected: Vec<u8> = (1..=24).collect();
@@ -1365,10 +1469,38 @@ mod tests {
         let elem = 1;
         let mut output = vec![0u8; 15]; // 3*5
 
-        copy_chunk_to_output(&[1, 2, 3, 6, 7, 8], &[0, 0], &chunk_dims, &dataset_dims, elem, &mut output);
-        copy_chunk_to_output(&[4, 5, 0, 9, 10, 0], &[0, 1], &chunk_dims, &dataset_dims, elem, &mut output);
-        copy_chunk_to_output(&[11, 12, 13, 0, 0, 0], &[1, 0], &chunk_dims, &dataset_dims, elem, &mut output);
-        copy_chunk_to_output(&[14, 15, 0, 0, 0, 0], &[1, 1], &chunk_dims, &dataset_dims, elem, &mut output);
+        copy_chunk_to_output(
+            &[1, 2, 3, 6, 7, 8],
+            &[0, 0],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
+        copy_chunk_to_output(
+            &[4, 5, 0, 9, 10, 0],
+            &[0, 1],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
+        copy_chunk_to_output(
+            &[11, 12, 13, 0, 0, 0],
+            &[1, 0],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
+        copy_chunk_to_output(
+            &[14, 15, 0, 0, 0, 0],
+            &[1, 1],
+            &chunk_dims,
+            &dataset_dims,
+            elem,
+            &mut output,
+        );
 
         let expected: Vec<u8> = (1..=15).collect();
         assert_eq!(output, expected);
@@ -1379,11 +1511,12 @@ mod tests {
     #[test]
     fn implicit_entries_1d() {
         let entries = read_implicit_chunk_entries(
-            1000, // base address
+            1000,  // base address
             &[12], // dataset dims
             &[4],  // chunk dims
             16,    // chunk byte size (4 elements * 4 bytes)
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].address, 1000);
@@ -1397,11 +1530,12 @@ mod tests {
     #[test]
     fn implicit_entries_2d() {
         let entries = read_implicit_chunk_entries(
-            0, // base address
+            0,        // base address
             &[10, 6], // dataset dims
             &[5, 3],  // chunk dims
             60,       // 5*3*4 bytes
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(entries.len(), 4); // 2x2 chunks
         assert_eq!(entries[0].scaled, vec![0, 0]);
@@ -1417,12 +1551,7 @@ mod tests {
     #[test]
     fn implicit_entries_edge_chunks() {
         // Dataset [7], chunk [4] → 2 chunks (one is partial)
-        let entries = read_implicit_chunk_entries(
-            100,
-            &[7],
-            &[4],
-            16,
-        ).unwrap();
+        let entries = read_implicit_chunk_entries(100, &[7], &[4], 16).unwrap();
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].scaled, vec![0]);

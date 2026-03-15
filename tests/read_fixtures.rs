@@ -1,5 +1,7 @@
-use hdf5_pure::{Datatype, File};
 use std::path::PathBuf;
+
+use hdf5_pure::Datatype;
+use hdf5_pure::File;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -471,10 +473,7 @@ fn read_vlen_string_metadata() {
             ..
         } => {
             assert!(is_string);
-            assert_eq!(
-                *char_set,
-                Some(hdf5_pure::datatype::CharacterSet::Utf8)
-            );
+            assert_eq!(*char_set, Some(hdf5_pure::datatype::CharacterSet::Utf8));
         }
         other => panic!("expected VarLen, got {:?}", other),
     }
@@ -759,7 +758,10 @@ fn read_shared_attribute_type() {
 
     // Attribute also uses the same committed type
     let attrs = ds.attributes().unwrap();
-    let scale = attrs.iter().find(|a| a.name == "scale").expect("missing 'scale' attr");
+    let scale = attrs
+        .iter()
+        .find(|a| a.name == "scale")
+        .expect("missing 'scale' attr");
     assert!(
         matches!(scale.datatype, Datatype::FixedPoint { size: 4, .. }),
         "expected shared i32 type, got {:?}",
@@ -782,7 +784,10 @@ fn read_empty_chunked() {
     // Should return all zeros (no data written)
     let raw = ds.read_raw().unwrap();
     assert_eq!(raw.len(), 40); // 10 * 4 bytes
-    assert!(raw.iter().all(|&b| b == 0), "expected all zeros for unallocated dataset");
+    assert!(
+        raw.iter().all(|&b| b == 0),
+        "expected all zeros for unallocated dataset"
+    );
 
     // read_slice should also work
     let slice = ds.read_slice(&[2], &[3]).unwrap();
@@ -851,7 +856,10 @@ fn read_creation_order_links() {
     assert_eq!(by_order, vec!["charlie", "alpha", "bravo"]);
 
     // Verify creation order differs from name-hash order
-    assert_ne!(by_name, by_order, "name order and creation order should differ");
+    assert_ne!(
+        by_name, by_order,
+        "name order and creation order should differ"
+    );
 }
 
 #[test]
@@ -872,15 +880,19 @@ fn read_creation_order_attributes() {
     // Verify the values are correct regardless of iteration order
     let zebra = by_order.iter().find(|a| a.name == "zebra").unwrap();
     let val = i32::from_le_bytes([
-        zebra.raw_value[0], zebra.raw_value[1],
-        zebra.raw_value[2], zebra.raw_value[3],
+        zebra.raw_value[0],
+        zebra.raw_value[1],
+        zebra.raw_value[2],
+        zebra.raw_value[3],
     ]);
     assert_eq!(val, 30);
 
     let mango = by_order.iter().find(|a| a.name == "mango").unwrap();
     let val = i32::from_le_bytes([
-        mango.raw_value[0], mango.raw_value[1],
-        mango.raw_value[2], mango.raw_value[3],
+        mango.raw_value[0],
+        mango.raw_value[1],
+        mango.raw_value[2],
+        mango.raw_value[3],
     ]);
     assert_eq!(val, 10);
 }
@@ -922,10 +934,10 @@ fn read_complex_dataset() {
         .collect();
 
     assert_eq!(values.len(), 4);
-    assert_eq!(values[0], (1.0, 2.0));   // 1+2i
-    assert_eq!(values[1], (3.0, 4.0));   // 3+4i
-    assert_eq!(values[2], (-1.0, 0.0));  // -1+0i
-    assert_eq!(values[3], (0.0, -5.0));  // 0-5i
+    assert_eq!(values[0], (1.0, 2.0)); // 1+2i
+    assert_eq!(values[1], (3.0, 4.0)); // 3+4i
+    assert_eq!(values[2], (-1.0, 0.0)); // -1+0i
+    assert_eq!(values[3], (0.0, -5.0)); // 0-5i
 }
 
 #[test]
@@ -999,8 +1011,18 @@ fn read_filtered_fheap_attributes() {
     let a1 = attrs.iter().find(|a| a.name == "attr_one").unwrap();
     let a2 = attrs.iter().find(|a| a.name == "attr_two").unwrap();
 
-    let v1 = i32::from_le_bytes([a1.raw_value[0], a1.raw_value[1], a1.raw_value[2], a1.raw_value[3]]);
-    let v2 = i32::from_le_bytes([a2.raw_value[0], a2.raw_value[1], a2.raw_value[2], a2.raw_value[3]]);
+    let v1 = i32::from_le_bytes([
+        a1.raw_value[0],
+        a1.raw_value[1],
+        a1.raw_value[2],
+        a1.raw_value[3],
+    ]);
+    let v2 = i32::from_le_bytes([
+        a2.raw_value[0],
+        a2.raw_value[1],
+        a2.raw_value[2],
+        a2.raw_value[3],
+    ]);
     assert_eq!(v1, 42);
     assert_eq!(v2, 99);
 }
@@ -1133,7 +1155,10 @@ fn read_compound_complex_members_metadata() {
             assert_eq!(members[0].byte_offset, 0);
             // "color" member should be an Enum type
             match &members[0].datatype {
-                Datatype::Enum { base, members: evals } => {
+                Datatype::Enum {
+                    base,
+                    members: evals,
+                } => {
                     assert_eq!(base.element_size(), 4);
                     assert_eq!(evals.len(), 3);
                 }
@@ -1143,7 +1168,10 @@ fn read_compound_complex_members_metadata() {
             assert_eq!(members[1].byte_offset, 4);
             // "coords" member should be an Array type
             match &members[1].datatype {
-                Datatype::Array { dimensions, element_type } => {
+                Datatype::Array {
+                    dimensions,
+                    element_type,
+                } => {
                     assert_eq!(dimensions, &vec![3]);
                     assert_eq!(element_type.element_size(), 4);
                 }

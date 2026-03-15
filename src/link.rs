@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// A decoded link message (type 0x0006).
 ///
@@ -42,7 +43,10 @@ pub enum LinkTarget {
     /// Soft link: path string.
     Soft { path: String },
     /// External link: file name and object path.
-    External { filename: String, object_path: String },
+    External {
+        filename: String,
+        object_path: String,
+    },
 }
 
 impl Link {
@@ -169,8 +173,10 @@ impl Link {
                     });
                 }
                 let address = match size_of_offsets {
-                    4 => u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                        as u64,
+                    4 => {
+                        u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                            as u64
+                    }
                     8 => u64::from_le_bytes([
                         data[pos],
                         data[pos + 1],
@@ -184,7 +190,7 @@ impl Link {
                     _ => {
                         return Err(Error::InvalidObjectHeader {
                             msg: format!("unsupported size_of_offsets {}", size_of_offsets),
-                        })
+                        });
                     }
                 };
                 LinkTarget::Hard { address }
@@ -238,7 +244,7 @@ impl Link {
             _ => {
                 return Err(Error::InvalidObjectHeader {
                     msg: format!("unknown link type {}", link_type),
-                })
+                });
             }
         };
 

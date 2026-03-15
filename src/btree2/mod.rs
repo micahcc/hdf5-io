@@ -1,6 +1,8 @@
 use crate::checksum;
-use crate::error::{Error, Result};
-use crate::io::{Le, ReadAt};
+use crate::error::Error;
+use crate::error::Result;
+use crate::io::Le;
+use crate::io::ReadAt;
 
 /// B-tree v2 header magic: `BTHD`
 pub const BTHD_MAGIC: [u8; 4] = *b"BTHD";
@@ -127,8 +129,7 @@ impl BTree2Header {
         let root_addr_off = addr + 16;
         let root_node_address =
             Le::read_offset(reader, root_addr_off, size_of_offsets).map_err(Error::Io)?;
-        let root_num_records =
-            Le::read_u16(reader, root_addr_off + o).map_err(Error::Io)?;
+        let root_num_records = Le::read_u16(reader, root_addr_off + o).map_err(Error::Io)?;
         let total_records =
             Le::read_length(reader, root_addr_off + o + 2, size_of_lengths).map_err(Error::Io)?;
 
@@ -211,10 +212,8 @@ fn compute_node_info(
         let ptr_size = sizeof_addr as usize + max_nrec_size + info[u - 1].cum_max_nrec_size;
         // max_nrec[u] = (node_size - 10 - ptr_size) / (record_size + ptr_size)
         // The extra ptr_size in the numerator accounts for the (n+1)th child pointer.
-        let int_max_nrec =
-            (node_size as usize - 10 - ptr_size) / (record_size as usize + ptr_size);
-        let cum =
-            (int_max_nrec as u64 + 1) * info[u - 1].cum_max_nrec + int_max_nrec as u64;
+        let int_max_nrec = (node_size as usize - 10 - ptr_size) / (record_size as usize + ptr_size);
+        let cum = (int_max_nrec as u64 + 1) * info[u - 1].cum_max_nrec + int_max_nrec as u64;
         let cum_size = limit_enc_size(cum);
         info.push(NodeInfo {
             max_nrec: int_max_nrec,
@@ -243,8 +242,12 @@ where
         return Ok(());
     }
 
-    let (max_nrec_size, node_info) =
-        compute_node_info(header.node_size, header.record_size, size_of_offsets, header.depth);
+    let (max_nrec_size, node_info) = compute_node_info(
+        header.node_size,
+        header.record_size,
+        size_of_offsets,
+        header.depth,
+    );
 
     iterate_node(
         reader,
@@ -515,8 +518,7 @@ pub fn parse_link_creation_order_record(data: &[u8], heap_id_len: usize) -> Opti
         return None;
     }
     let creation_order = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]);
     let heap_id = data[8..8 + heap_id_len].to_vec();
     Some((creation_order, heap_id))
@@ -576,7 +578,10 @@ pub fn parse_attribute_name_record(data: &[u8], heap_id_len: usize) -> Option<Ve
 /// Parse a B-tree v2 "type 9" record (attribute creation order).
 ///
 /// Layout: heap_id (heap_id_len bytes) + flags (1 byte) + creation_order (4 bytes).
-pub fn parse_attribute_creation_order_record(data: &[u8], heap_id_len: usize) -> Option<(u32, Vec<u8>)> {
+pub fn parse_attribute_creation_order_record(
+    data: &[u8],
+    heap_id_len: usize,
+) -> Option<(u32, Vec<u8>)> {
     if data.len() < heap_id_len + 1 + 4 {
         return None;
     }
@@ -584,7 +589,10 @@ pub fn parse_attribute_creation_order_record(data: &[u8], heap_id_len: usize) ->
     // flags at heap_id_len
     let co_off = heap_id_len + 1;
     let creation_order = u32::from_le_bytes([
-        data[co_off], data[co_off + 1], data[co_off + 2], data[co_off + 3],
+        data[co_off],
+        data[co_off + 1],
+        data[co_off + 2],
+        data[co_off + 3],
     ]);
     Some((creation_order, heap_id))
 }

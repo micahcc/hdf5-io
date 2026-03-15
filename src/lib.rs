@@ -37,10 +37,16 @@ pub mod object_header;
 pub mod superblock;
 
 // Re-export the main public types at crate root.
-pub use error::{Error, Result};
-pub use file::{Attribute, Dataset, File, FillValue, Group, Node};
 pub use dataspace::Dataspace;
 pub use datatype::Datatype;
+pub use error::Error;
+pub use error::Result;
+pub use file::Attribute;
+pub use file::Dataset;
+pub use file::File;
+pub use file::FillValue;
+pub use file::Group;
+pub use file::Node;
 pub use io::ReadAt;
 pub use layout::DataLayout;
 pub use superblock::Superblock;

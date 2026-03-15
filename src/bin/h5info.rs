@@ -1,6 +1,14 @@
-use hdf5_pure::{Attribute, DataLayout, Dataspace, Dataset, Datatype, File, Group, Node};
 use std::env;
 use std::process;
+
+use hdf5_pure::Attribute;
+use hdf5_pure::DataLayout;
+use hdf5_pure::Dataset;
+use hdf5_pure::Dataspace;
+use hdf5_pure::Datatype;
+use hdf5_pure::File;
+use hdf5_pure::Group;
+use hdf5_pure::Node;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -29,7 +37,10 @@ fn main() {
     println!("  version: {}", sb.version);
     println!("  size_of_offsets: {}", sb.size_of_offsets);
     println!("  size_of_lengths: {}", sb.size_of_lengths);
-    println!("  root_group_addr: {:#x}", sb.root_group_object_header_address);
+    println!(
+        "  root_group_addr: {:#x}",
+        sb.root_group_object_header_address
+    );
     println!("}}");
 
     if let Some(ds_path) = read_dataset {
@@ -55,7 +66,12 @@ fn indent(level: usize) -> String {
     "  ".repeat(level)
 }
 
-fn print_group<R: hdf5_pure::ReadAt + ?Sized>(file: &File<R>, group: &Group<'_, R>, name: &str, level: usize) {
+fn print_group<R: hdf5_pure::ReadAt + ?Sized>(
+    file: &File<R>,
+    group: &Group<'_, R>,
+    name: &str,
+    level: usize,
+) {
     let pre = indent(level);
     println!("{}GROUP \"{}\" {{", pre, name);
 
@@ -168,17 +184,41 @@ fn format_attr_value(attr: &Attribute) -> String {
         Datatype::FixedPoint { size, signed, .. } => match (*size, *signed) {
             (1, false) => format!("{}", raw[0]),
             (1, true) => format!("{}", raw[0] as i8),
-            (2, false) => format!("{}", u16::from_le_bytes(raw[..2].try_into().unwrap_or([0; 2]))),
-            (2, true) => format!("{}", i16::from_le_bytes(raw[..2].try_into().unwrap_or([0; 2]))),
-            (4, false) => format!("{}", u32::from_le_bytes(raw[..4].try_into().unwrap_or([0; 4]))),
-            (4, true) => format!("{}", i32::from_le_bytes(raw[..4].try_into().unwrap_or([0; 4]))),
-            (8, false) => format!("{}", u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]))),
-            (8, true) => format!("{}", i64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]))),
+            (2, false) => format!(
+                "{}",
+                u16::from_le_bytes(raw[..2].try_into().unwrap_or([0; 2]))
+            ),
+            (2, true) => format!(
+                "{}",
+                i16::from_le_bytes(raw[..2].try_into().unwrap_or([0; 2]))
+            ),
+            (4, false) => format!(
+                "{}",
+                u32::from_le_bytes(raw[..4].try_into().unwrap_or([0; 4]))
+            ),
+            (4, true) => format!(
+                "{}",
+                i32::from_le_bytes(raw[..4].try_into().unwrap_or([0; 4]))
+            ),
+            (8, false) => format!(
+                "{}",
+                u64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]))
+            ),
+            (8, true) => format!(
+                "{}",
+                i64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]))
+            ),
             _ => format!("{:?}", &raw[..(*size as usize).min(raw.len())]),
         },
         Datatype::FloatingPoint { size, .. } => match *size {
-            4 => format!("{}", f32::from_le_bytes(raw[..4].try_into().unwrap_or([0; 4]))),
-            8 => format!("{}", f64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]))),
+            4 => format!(
+                "{}",
+                f32::from_le_bytes(raw[..4].try_into().unwrap_or([0; 4]))
+            ),
+            8 => format!(
+                "{}",
+                f64::from_le_bytes(raw[..8].try_into().unwrap_or([0; 8]))
+            ),
             _ => format!("{:?}", &raw[..(*size as usize).min(raw.len())]),
         },
         _ => {
@@ -278,7 +318,9 @@ fn format_datatype(dt: &Datatype) -> String {
                 format!("H5T_VLEN {{ base={} }}", format_datatype(element_type))
             }
         }
-        Datatype::Opaque { size, tag } => format!("H5T_OPAQUE {{ size={}; tag=\"{}\" }}", size, tag),
+        Datatype::Opaque { size, tag } => {
+            format!("H5T_OPAQUE {{ size={}; tag=\"{}\" }}", size, tag)
+        }
         Datatype::BitField { size, .. } => format!("H5T_BITFIELD {{ size={} }}", size),
         Datatype::Reference { ref_type } => match ref_type {
             hdf5_pure::datatype::ReferenceType::Object => "H5T_REFERENCE(OBJECT)".to_string(),

@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// A decoded HDF5 dataspace message.
 ///
@@ -144,7 +145,7 @@ impl Dataspace {
             _ => {
                 return Err(Error::InvalidDataspace {
                     msg: format!("unknown dataspace type {}", ds_type),
-                })
+                });
             }
         }
 

@@ -1,6 +1,8 @@
 use crate::checksum;
-use crate::error::{Error, Result};
-use crate::io::{Le, ReadAt};
+use crate::error::Error;
+use crate::error::Result;
+use crate::io::Le;
+use crate::io::ReadAt;
 
 /// HDF5 file signature: `\x89HDF\r\n\x1a\n`
 pub const HDF5_SIGNATURE: [u8; 8] = [0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -66,9 +68,7 @@ impl Superblock {
     pub fn parse<R: ReadAt + ?Sized>(reader: &R, offset: u64) -> Result<Self> {
         // Read signature
         let mut sig = [0u8; 8];
-        reader
-            .read_exact_at(offset, &mut sig)
-            .map_err(Error::Io)?;
+        reader.read_exact_at(offset, &mut sig).map_err(Error::Io)?;
 
         if sig != HDF5_SIGNATURE {
             return Err(Error::InvalidSignature { offset });

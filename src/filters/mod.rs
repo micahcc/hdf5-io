@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// HDF5 filter IDs.
 ///
@@ -197,11 +198,7 @@ fn apply_filter_reverse(filter: &Filter, data: Vec<u8>) -> Result<Vec<u8>> {
     match filter.id {
         FILTER_DEFLATE => decompress_deflate(&data),
         FILTER_SHUFFLE => {
-            let element_size = filter
-                .client_data
-                .first()
-                .copied()
-                .unwrap_or(1) as usize;
+            let element_size = filter.client_data.first().copied().unwrap_or(1) as usize;
             Ok(unshuffle(&data, element_size))
         }
         FILTER_FLETCHER32 => {
@@ -214,12 +211,10 @@ fn apply_filter_reverse(filter: &Filter, data: Vec<u8>) -> Result<Vec<u8>> {
             let out_size = filter.client_data.get(2).copied().unwrap_or(0) as usize;
             decompress_lzf(&data, out_size)
         }
-        FILTER_SZIP => {
-            Err(Error::UnsupportedFilter {
-                id: filter.id,
-                name: "szip".into(),
-            })
-        }
+        FILTER_SZIP => Err(Error::UnsupportedFilter {
+            id: filter.id,
+            name: "szip".into(),
+        }),
         _ => Err(Error::UnsupportedFilter {
             id: filter.id,
             name: filter
@@ -232,14 +227,17 @@ fn apply_filter_reverse(filter: &Filter, data: Vec<u8>) -> Result<Vec<u8>> {
 
 /// Decompress DEFLATE (zlib) compressed data.
 fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>> {
-    use flate2::read::ZlibDecoder;
     use std::io::Read;
+
+    use flate2::read::ZlibDecoder;
 
     let mut decoder = ZlibDecoder::new(data);
     let mut output = Vec::new();
-    decoder.read_to_end(&mut output).map_err(|e| Error::DecompressionError {
-        msg: format!("deflate: {}", e),
-    })?;
+    decoder
+        .read_to_end(&mut output)
+        .map_err(|e| Error::DecompressionError {
+            msg: format!("deflate: {}", e),
+        })?;
     Ok(output)
 }
 
@@ -252,7 +250,11 @@ fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>> {
 ///     If length == 9 (all 3 high bits set), read one more byte and add to length + 2.
 ///     Offset = ((byte & 0x1f) << 8) | next_byte, plus 1.
 fn decompress_lzf(data: &[u8], out_size_hint: usize) -> Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(if out_size_hint > 0 { out_size_hint } else { data.len() * 2 });
+    let mut output = Vec::with_capacity(if out_size_hint > 0 {
+        out_size_hint
+    } else {
+        data.len() * 2
+    });
     let mut ip = 0; // input position
 
     while ip < data.len() {
@@ -295,7 +297,11 @@ fn decompress_lzf(data: &[u8], out_size_hint: usize) -> Result<Vec<u8>> {
             let ref_pos = output.len().wrapping_sub(offset + 1);
             if ref_pos >= output.len() {
                 return Err(Error::DecompressionError {
-                    msg: format!("lzf: back-reference out of bounds: ref_pos={}, output_len={}", ref_pos, output.len()),
+                    msg: format!(
+                        "lzf: back-reference out of bounds: ref_pos={}, output_len={}",
+                        ref_pos,
+                        output.len()
+                    ),
                 });
             }
 
@@ -425,7 +431,11 @@ struct NbitState<'a> {
 
 impl<'a> NbitState<'a> {
     fn new(buffer: &'a [u8]) -> Self {
-        NbitState { buffer, j: 0, buf_len: 8 }
+        NbitState {
+            buffer,
+            j: 0,
+            buf_len: 8,
+        }
     }
 
     fn next_byte(&mut self) {
@@ -434,7 +444,11 @@ impl<'a> NbitState<'a> {
     }
 
     fn cur(&self) -> u8 {
-        if self.j < self.buffer.len() { self.buffer[self.j] } else { 0 }
+        if self.j < self.buffer.len() {
+            self.buffer[self.j]
+        } else {
+            0
+        }
     }
 }
 
@@ -470,11 +484,13 @@ fn nbit_decompress_one_byte(
 
     if state.buf_len > dat_len {
         data[data_offset + k] = (((val >> (state.buf_len - dat_len)) as u32
-            & ((1u32 << dat_len) - 1)) << dat_offset) as u8;
+            & ((1u32 << dat_len) - 1))
+            << dat_offset) as u8;
         state.buf_len -= dat_len;
     } else {
         data[data_offset + k] = ((((val as u32) & ((1u32 << state.buf_len) - 1))
-            << (dat_len - state.buf_len)) << dat_offset) as u8;
+            << (dat_len - state.buf_len))
+            << dat_offset) as u8;
         let remaining = dat_len - state.buf_len;
         state.next_byte();
         if remaining == 0 {
@@ -482,7 +498,8 @@ fn nbit_decompress_one_byte(
         }
         let val2 = state.cur();
         data[data_offset + k] |= ((((val2 >> (state.buf_len - remaining)) as u32)
-            & ((1u32 << remaining) - 1)) << dat_offset) as u8;
+            & ((1u32 << remaining) - 1))
+            << dat_offset) as u8;
         state.buf_len -= remaining;
     }
 }
@@ -505,7 +522,16 @@ fn nbit_decompress_one_atomic(
 
         let mut k = begin_i as isize;
         while k >= end_i as isize {
-            nbit_decompress_one_byte(data, data_offset, k as usize, begin_i, end_i, state, p, datatype_len);
+            nbit_decompress_one_byte(
+                data,
+                data_offset,
+                k as usize,
+                begin_i,
+                end_i,
+                state,
+                p,
+                datatype_len,
+            );
             k -= 1;
         }
     } else {
@@ -530,15 +556,16 @@ fn nbit_decompress_one_nooptype(
 ) {
     for i in 0..size {
         let val = state.cur();
-        data[data_offset + i] = (((val as u32) & ((1u32 << state.buf_len) - 1)) << (8 - state.buf_len)) as u8;
+        data[data_offset + i] =
+            (((val as u32) & ((1u32 << state.buf_len) - 1)) << (8 - state.buf_len)) as u8;
         let remaining = 8 - state.buf_len;
         state.next_byte();
         if remaining == 0 {
             continue;
         }
         let val2 = state.cur();
-        data[data_offset + i] |= ((val2 >> (state.buf_len - remaining)) as u32
-            & ((1u32 << remaining) - 1)) as u8;
+        data[data_offset + i] |=
+            ((val2 >> (state.buf_len - remaining)) as u32 & ((1u32 << remaining) - 1)) as u8;
         state.buf_len -= remaining;
     }
 }
@@ -574,7 +601,13 @@ fn nbit_decompress_one_array(
             let n = total_size / base_size;
             let begin_index = *parms_index;
             for i in 0..n {
-                nbit_decompress_one_array(data, data_offset + i * base_size, state, parms, parms_index)?;
+                nbit_decompress_one_array(
+                    data,
+                    data_offset + i * base_size,
+                    state,
+                    parms,
+                    parms_index,
+                )?;
                 *parms_index = begin_index;
             }
         }
@@ -583,7 +616,13 @@ fn nbit_decompress_one_array(
             let n = total_size / base_size;
             let begin_index = *parms_index;
             for i in 0..n {
-                nbit_decompress_one_compound(data, data_offset + i * base_size, state, parms, parms_index)?;
+                nbit_decompress_one_compound(
+                    data,
+                    data_offset + i * base_size,
+                    state,
+                    parms,
+                    parms_index,
+                )?;
                 *parms_index = begin_index;
             }
         }
@@ -591,7 +630,11 @@ fn nbit_decompress_one_array(
             *parms_index += 1; // skip size
             nbit_decompress_one_nooptype(data, data_offset, state, total_size);
         }
-        _ => return Err(Error::DecompressionError { msg: format!("nbit: unknown class {}", base_class) }),
+        _ => {
+            return Err(Error::DecompressionError {
+                msg: format!("nbit: unknown class {}", base_class),
+            });
+        }
     }
     Ok(())
 }
@@ -626,17 +669,33 @@ fn nbit_decompress_one_compound(
                 nbit_decompress_one_atomic(data, data_offset + member_offset, state, &p);
             }
             NBIT_ARRAY => {
-                nbit_decompress_one_array(data, data_offset + member_offset, state, parms, parms_index)?;
+                nbit_decompress_one_array(
+                    data,
+                    data_offset + member_offset,
+                    state,
+                    parms,
+                    parms_index,
+                )?;
             }
             NBIT_COMPOUND => {
-                nbit_decompress_one_compound(data, data_offset + member_offset, state, parms, parms_index)?;
+                nbit_decompress_one_compound(
+                    data,
+                    data_offset + member_offset,
+                    state,
+                    parms,
+                    parms_index,
+                )?;
             }
             NBIT_NOOPTYPE => {
                 let member_size = parms[*parms_index] as usize;
                 *parms_index += 1;
                 nbit_decompress_one_nooptype(data, data_offset + member_offset, state, member_size);
             }
-            _ => return Err(Error::DecompressionError { msg: format!("nbit: unknown member class {}", member_class) }),
+            _ => {
+                return Err(Error::DecompressionError {
+                    msg: format!("nbit: unknown member class {}", member_class),
+                });
+            }
         }
     }
     Ok(())
@@ -644,7 +703,9 @@ fn nbit_decompress_one_compound(
 
 fn decompress_nbit(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
     if cd_values.len() < 5 {
-        return Err(Error::DecompressionError { msg: "nbit: cd_values too short".into() });
+        return Err(Error::DecompressionError {
+            msg: "nbit: cd_values too short".into(),
+        });
     }
 
     // cd_values[1]: need_not_compress flag
@@ -671,7 +732,9 @@ fn decompress_nbit(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
                 offset: parms[4],
             };
             if p.precision > p.size * 8 || (p.precision + p.offset) > p.size * 8 {
-                return Err(Error::DecompressionError { msg: "nbit: invalid precision/offset".into() });
+                return Err(Error::DecompressionError {
+                    msg: "nbit: invalid precision/offset".into(),
+                });
             }
             for i in 0..d_nelmts {
                 nbit_decompress_one_atomic(&mut output, i * p.size as usize, &mut state, &p);
@@ -681,7 +744,13 @@ fn decompress_nbit(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
             let size = parms[1] as usize;
             let mut parms_index: usize = 1; // relative to parms (which is cd_values[3..])
             for i in 0..d_nelmts {
-                nbit_decompress_one_array(&mut output, i * size, &mut state, parms, &mut parms_index)?;
+                nbit_decompress_one_array(
+                    &mut output,
+                    i * size,
+                    &mut state,
+                    parms,
+                    &mut parms_index,
+                )?;
                 parms_index = 1;
             }
         }
@@ -689,11 +758,21 @@ fn decompress_nbit(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
             let size = parms[1] as usize;
             let mut parms_index: usize = 1;
             for i in 0..d_nelmts {
-                nbit_decompress_one_compound(&mut output, i * size, &mut state, parms, &mut parms_index)?;
+                nbit_decompress_one_compound(
+                    &mut output,
+                    i * size,
+                    &mut state,
+                    parms,
+                    &mut parms_index,
+                )?;
                 parms_index = 1;
             }
         }
-        _ => return Err(Error::DecompressionError { msg: format!("nbit: unsupported top-level class {}", parms[0]) }),
+        _ => {
+            return Err(Error::DecompressionError {
+                msg: format!("nbit: unsupported top-level class {}", parms[0]),
+            });
+        }
     }
 
     Ok(output)
@@ -738,8 +817,8 @@ fn so_decompress_one_byte(
     };
 
     if *bits_to_fill > bits_to_copy {
-        data[data_offset + k] = ((val >> (*bits_to_fill - bits_to_copy)) as u32
-            & ((1u32 << bits_to_copy) - 1)) as u8;
+        data[data_offset + k] =
+            ((val >> (*bits_to_fill - bits_to_copy)) as u32 & ((1u32 << bits_to_copy) - 1)) as u8;
         *bits_to_fill -= bits_to_copy;
     } else {
         data[data_offset + k] = (((val as u32) & ((1u32 << *bits_to_fill) - 1))
@@ -754,8 +833,8 @@ fn so_decompress_one_byte(
             return;
         }
         let val2 = buffer[*j];
-        data[data_offset + k] |= ((val2 >> (*bits_to_fill - remaining)) as u32
-            & ((1u32 << remaining) - 1)) as u8;
+        data[data_offset + k] |=
+            ((val2 >> (*bits_to_fill - remaining)) as u32 & ((1u32 << remaining) - 1)) as u8;
         *bits_to_fill -= remaining;
     }
 }
@@ -776,20 +855,42 @@ fn so_decompress_one_atomic(
         let begin_i = (size as usize) - 1 - ((dtype_len - minbits) / 8) as usize;
         let mut k = begin_i as isize;
         while k >= 0 {
-            so_decompress_one_byte(data, data_offset, k as usize, begin_i, buffer, j, bits_to_fill, minbits, dtype_len);
+            so_decompress_one_byte(
+                data,
+                data_offset,
+                k as usize,
+                begin_i,
+                buffer,
+                j,
+                bits_to_fill,
+                minbits,
+                dtype_len,
+            );
             k -= 1;
         }
     } else {
         let begin_i = ((dtype_len - minbits) / 8) as usize;
         for k in begin_i..size as usize {
-            so_decompress_one_byte(data, data_offset, k, begin_i, buffer, j, bits_to_fill, minbits, dtype_len);
+            so_decompress_one_byte(
+                data,
+                data_offset,
+                k,
+                begin_i,
+                buffer,
+                j,
+                bits_to_fill,
+                minbits,
+                dtype_len,
+            );
         }
     }
 }
 
 fn decompress_scaleoffset(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
     if cd_values.len() < 8 {
-        return Err(Error::DecompressionError { msg: "scaleoffset: cd_values too short".into() });
+        return Err(Error::DecompressionError {
+            msg: "scaleoffset: cd_values too short".into(),
+        });
     }
 
     let scale_type = cd_values[SO_PARM_SCALETYPE];
@@ -802,7 +903,9 @@ fn decompress_scaleoffset(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
     let filavail = cd_values[SO_PARM_FILAVAIL];
 
     if data.len() < 5 {
-        return Err(Error::DecompressionError { msg: "scaleoffset: buffer too short".into() });
+        return Err(Error::DecompressionError {
+            msg: "scaleoffset: buffer too short".into(),
+        });
     }
 
     // Read minbits (4 bytes LE)
@@ -813,7 +916,9 @@ fn decompress_scaleoffset(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
     let minval_size = stored_minval_size.min(8);
     let mut minval: u64 = 0;
     if data.len() < 5 + minval_size {
-        return Err(Error::DecompressionError { msg: "scaleoffset: buffer too short for minval".into() });
+        return Err(Error::DecompressionError {
+            msg: "scaleoffset: buffer too short for minval".into(),
+        });
     }
     for i in 0..minval_size {
         minval |= (data[5 + i] as u64) << (i * 8);
@@ -825,7 +930,9 @@ fn decompress_scaleoffset(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
     // Special case: minbits == full precision — raw copy
     if minbits == (dtype_size as u32) * 8 {
         if data.len() < buf_offset + size_out {
-            return Err(Error::DecompressionError { msg: "scaleoffset: buffer too short for full copy".into() });
+            return Err(Error::DecompressionError {
+                msg: "scaleoffset: buffer too short for full copy".into(),
+            });
         }
         let mut output = data[buf_offset..buf_offset + size_out].to_vec();
 
@@ -843,7 +950,11 @@ fn decompress_scaleoffset(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
 
     // Decompress packed data
     if minbits != 0 {
-        let packed = if buf_offset < data.len() { &data[buf_offset..] } else { &[] as &[u8] };
+        let packed = if buf_offset < data.len() {
+            &data[buf_offset..]
+        } else {
+            &[] as &[u8]
+        };
         let mut j: usize = 0;
         let mut bits_to_fill: usize = 8;
 
@@ -853,17 +964,41 @@ fn decompress_scaleoffset(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
 
         for i in 0..d_nelmts {
             so_decompress_one_atomic(
-                &mut output, i * dtype_size, packed, &mut j, &mut bits_to_fill,
-                dtype_size as u32, minbits, mem_order_le,
+                &mut output,
+                i * dtype_size,
+                packed,
+                &mut j,
+                &mut bits_to_fill,
+                dtype_size as u32,
+                minbits,
+                mem_order_le,
             );
         }
     }
 
     // Post-decompress: add minval back
     if dtype_class == SO_CLS_INTEGER {
-        so_postdecompress_int(&mut output, d_nelmts, dtype_size, dtype_sign, filavail, cd_values, minbits, minval);
+        so_postdecompress_int(
+            &mut output,
+            d_nelmts,
+            dtype_size,
+            dtype_sign,
+            filavail,
+            cd_values,
+            minbits,
+            minval,
+        );
     } else if dtype_class == SO_CLS_FLOAT && scale_type == SO_FLOAT_DSCALE {
-        so_postdecompress_float(&mut output, d_nelmts, dtype_size, filavail, cd_values, minbits, minval, scale_factor as f64);
+        so_postdecompress_float(
+            &mut output,
+            d_nelmts,
+            dtype_size,
+            filavail,
+            cd_values,
+            minbits,
+            minval,
+            scale_factor as f64,
+        );
     }
 
     // Convert byte order if dataset is BE and we're on LE
@@ -906,7 +1041,9 @@ fn so_postdecompress_int(
                 let filval_start = SO_PARM_FILAVAIL + 1; // cd_values[8]
                 for b in 0..dtype_size.min(cd_values.len().saturating_sub(filval_start) * 4) {
                     let cd_idx = filval_start + b / 4;
-                    if cd_idx >= cd_values.len() { break; }
+                    if cd_idx >= cd_values.len() {
+                        break;
+                    }
                     let byte_in_cd = b % 4;
                     filval |= (((cd_values[cd_idx] >> (byte_in_cd * 8)) & 0xFF) as u64) << (b * 8);
                 }
@@ -969,7 +1106,9 @@ fn so_postdecompress_float(
                 let filval_start = SO_PARM_FILAVAIL + 1;
                 for b in 0..dtype_size.min(cd_values.len().saturating_sub(filval_start) * 4) {
                     let cd_idx = filval_start + b / 4;
-                    if cd_idx >= cd_values.len() { break; }
+                    if cd_idx >= cd_values.len() {
+                        break;
+                    }
                     let byte_in_cd = b % 4;
                     filval |= (((cd_values[cd_idx] >> (byte_in_cd * 8)) & 0xFF) as u64) << (b * 8);
                 }
@@ -1059,12 +1198,21 @@ mod tests {
         // Buffer: minbits(4) + sizeof_ull(1) + minval(8) + padding(8) + packed data
         let mut buf = vec![0u8; 21];
         // minbits = 3
-        buf[0] = 3; buf[1] = 0; buf[2] = 0; buf[3] = 0;
+        buf[0] = 3;
+        buf[1] = 0;
+        buf[2] = 0;
+        buf[3] = 0;
         // sizeof_ull = 8
         buf[4] = 8;
         // minval = 1000 = 0x3E8
-        buf[5] = 0xE8; buf[6] = 0x03; buf[7] = 0; buf[8] = 0;
-        buf[9] = 0; buf[10] = 0; buf[11] = 0; buf[12] = 0;
+        buf[5] = 0xE8;
+        buf[6] = 0x03;
+        buf[7] = 0;
+        buf[8] = 0;
+        buf[9] = 0;
+        buf[10] = 0;
+        buf[11] = 0;
+        buf[12] = 0;
         // Packed data: values 0,1,2,3 in 3-bit fields, MSB-first
         // 000 001 010 011 = 0b00000101_0011xxxx = 0x05 0x30
         buf.push(0b00000101);
@@ -1072,7 +1220,8 @@ mod tests {
 
         let result = decompress_scaleoffset(&buf, &cd).unwrap();
         assert_eq!(result.len(), 16); // 4 * 4 bytes
-        let values: Vec<i32> = result.chunks_exact(4)
+        let values: Vec<i32> = result
+            .chunks_exact(4)
             .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(values, vec![1000, 1001, 1002, 1003]);

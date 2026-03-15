@@ -1,8 +1,19 @@
-use hdf5_pure::{Attribute, DataLayout, Dataspace, Dataset, Datatype, File, Group, Node};
-use serde_json::{json, Map, Value};
 use std::env;
-use std::io::{self, Write};
+use std::io::Write;
+use std::io::{self};
 use std::process;
+
+use hdf5_pure::Attribute;
+use hdf5_pure::DataLayout;
+use hdf5_pure::Dataset;
+use hdf5_pure::Dataspace;
+use hdf5_pure::Datatype;
+use hdf5_pure::File;
+use hdf5_pure::Group;
+use hdf5_pure::Node;
+use serde_json::Map;
+use serde_json::Value;
+use serde_json::json;
 
 fn main() {
     let args: Vec<String> = env::args().collect();

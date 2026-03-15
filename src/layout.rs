@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// Chunk indexing method (HDF5 1.10+ / layout message version 4).
 ///
@@ -37,14 +38,9 @@ pub enum ChunkIndexType {
 #[derive(Debug, Clone)]
 pub enum DataLayout {
     /// Compact: data stored directly in the object header.
-    Compact {
-        data: Vec<u8>,
-    },
+    Compact { data: Vec<u8> },
     /// Contiguous: data stored at a single file offset.
-    Contiguous {
-        address: u64,
-        size: u64,
-    },
+    Contiguous { address: u64, size: u64 },
     /// Chunked: data stored in fixed-size chunks, indexed.
     Chunked {
         /// Number of dimensions.
@@ -272,7 +268,7 @@ impl DataLayout {
                     _ => {
                         return Err(Error::InvalidLayout {
                             msg: format!("unknown chunk index type {}", chunk_index_type_id),
-                        })
+                        });
                     }
                 };
 
@@ -284,8 +280,7 @@ impl DataLayout {
                     ChunkIndexType::SingleChunk => {
                         if (flags & 0x02) != 0 {
                             // SINGLE_INDEX_WITH_FILTER: filtered_size + filter_mask
-                            single_chunk_filtered_size =
-                                Some(read_var_uint(&data[pos..], l));
+                            single_chunk_filtered_size = Some(read_var_uint(&data[pos..], l));
                             pos += l;
                             single_chunk_filter_mask = Some(u32::from_le_bytes([
                                 data[pos],

@@ -1,5 +1,7 @@
-use crate::error::{Error, Result};
-use crate::io::{Le, ReadAt};
+use crate::error::Error;
+use crate::error::Result;
+use crate::io::Le;
+use crate::io::ReadAt;
 
 const GCOL_MAGIC: &[u8; 4] = b"GCOL";
 
@@ -170,7 +172,7 @@ pub fn resolve_vlen_elements<R: ReadAt + ?Sized>(
             _ => {
                 return Err(Error::Other {
                     msg: format!("unsupported size_of_offsets: {}", size_of_offsets),
-                })
+                });
             }
         };
 
@@ -206,8 +208,7 @@ mod tests {
         let padded_data = (object_data.len() + 7) & !7;
         // Free space marker object header
         let free_header_size = obj_header_size;
-        let collection_size =
-            8 + sl + obj_header_size + padded_data + free_header_size;
+        let collection_size = 8 + sl + obj_header_size + padded_data + free_header_size;
 
         let mut buf = Vec::new();
         // Magic
@@ -313,17 +314,17 @@ mod tests {
         buf.extend_from_slice(&(collection_size as u64).to_le_bytes());
 
         // Free space entry (index 0)
-        buf.extend_from_slice(&0u16.to_le_bytes());    // index = 0
-        buf.extend_from_slice(&0u16.to_le_bytes());    // refcount
-        buf.extend_from_slice(&[0u8; 4]);               // reserved
+        buf.extend_from_slice(&0u16.to_le_bytes()); // index = 0
+        buf.extend_from_slice(&0u16.to_le_bytes()); // refcount
+        buf.extend_from_slice(&[0u8; 4]); // reserved
         buf.extend_from_slice(&(free_total_size as u64).to_le_bytes()); // size (includes header)
         // Dead space within the free entry
         buf.extend_from_slice(&[0u8; 16]);
 
         // Real object (index 2)
-        buf.extend_from_slice(&2u16.to_le_bytes());    // index = 2
-        buf.extend_from_slice(&1u16.to_le_bytes());    // refcount
-        buf.extend_from_slice(&[0u8; 4]);               // reserved
+        buf.extend_from_slice(&2u16.to_le_bytes()); // index = 2
+        buf.extend_from_slice(&1u16.to_le_bytes()); // refcount
+        buf.extend_from_slice(&[0u8; 4]); // reserved
         buf.extend_from_slice(&(obj_data.len() as u64).to_le_bytes()); // size
         buf.extend_from_slice(obj_data);
 
