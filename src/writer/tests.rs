@@ -802,65 +802,414 @@ fn write_to_file_roundtrip() {
     assert_eq!(ds.read_raw().unwrap(), data);
 }
 
-#[test]
-fn compat_simple_contiguous_v2() {
-    let reference = std::fs::read("tests/fixtures/simple_contiguous_v2.h5").unwrap();
+fn assert_bytes_match(our_bytes: &[u8], fixture_path: &str) {
+    let reference = std::fs::read(fixture_path).unwrap();
+    if *our_bytes == *reference {
+        return;
+    }
+    let max_len = our_bytes.len().max(reference.len());
+    let mut first_diff = None;
+    let mut diff_count = 0;
+    for i in 0..max_len {
+        let ours = our_bytes.get(i).copied();
+        let theirs = reference.get(i).copied();
+        if ours != theirs {
+            if first_diff.is_none() {
+                first_diff = Some(i);
+            }
+            diff_count += 1;
+            if diff_count <= 20 {
+                eprintln!(
+                    "  offset 0x{:04x}: ours={:?} ref={:?}",
+                    i,
+                    ours.map(|b| format!("0x{b:02x}")),
+                    theirs.map(|b| format!("0x{b:02x}")),
+                );
+            }
+        }
+    }
+    panic!(
+        "{}: byte mismatch: our_len={} ref_len={}, {} diffs, first at 0x{:04x}",
+        fixture_path,
+        our_bytes.len(),
+        reference.len(),
+        diff_count,
+        first_diff.unwrap_or(0),
+    );
+}
 
-    let ts = (1704096000u32, 1704096000, 1704096000, 1704096000);
-    let opts = WriteOptions {
-        timestamps: Some(ts),
+fn compat_opts_v2() -> WriteOptions {
+    WriteOptions {
+        timestamps: Some((1704096000, 1704096000, 1704096000, 1704096000)),
         hdf5lib_compat: true,
         ..Default::default()
-    };
-    let mut w = FileWriter::with_options(opts);
+    }
+}
 
-    let values: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
-    let data: Vec<u8> = values.iter().flat_map(|x| x.to_le_bytes()).collect();
+fn compat_opts_v3() -> WriteOptions {
+    WriteOptions {
+        timestamps: Some((1704096000, 1704096000, 1704096000, 1704096000)),
+        hdf5lib_compat: true,
+        superblock_version: Some(3),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn compat_simple_contiguous_v2() {
+    let mut w = FileWriter::with_options(compat_opts_v2());
+    let data: Vec<u8> = [1.0f64, 2.0, 3.0, 4.0]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
     let ds = w
         .root_mut()
         .add_dataset("data", crate::Datatype::native_f64(), &[4], data);
+    ds.add_attribute(
+        "units",
+        crate::Datatype::String {
+            size: 5,
+            padding: crate::datatype::StringPadding::NullTerminate,
+            char_set: crate::datatype::CharacterSet::Ascii,
+        },
+        &[],
+        b"m/s\0\0".to_vec(),
+    );
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/simple_contiguous_v2.h5");
+}
 
-    // Add "units" string attribute (fixed-size, 5 bytes, null-terminated)
-    let attr_type = crate::Datatype::String {
-        size: 5,
-        padding: crate::datatype::StringPadding::NullTerminate,
-        char_set: crate::datatype::CharacterSet::Ascii,
+#[test]
+fn compat_nested_groups_v2() {
+    let mut w = FileWriter::with_options(compat_opts_v2());
+    let root = w.root_mut();
+    let g1 = root.add_group("group1");
+    let sg = g1.add_group("subgroup");
+    let temps: Vec<u8> = [20.5f32, 21.0, 19.8]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    sg.add_dataset("temps", crate::Datatype::native_f32(), &[3], temps);
+    let ids: Vec<u8> = vec![10u8, 20, 30, 40, 50];
+    g1.add_dataset("ids", crate::Datatype::native_u8(), &[5], ids);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/nested_groups_v2.h5");
+}
+
+#[test]
+fn compat_fill_value() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let data: Vec<u8> = [10i32, 20, 30, 40, -999, -999]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w
+        .root_mut()
+        .add_dataset("filled", crate::Datatype::native_i32(), &[6], data);
+    ds.set_fill_value((-999i32).to_le_bytes().to_vec());
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/fill_value.h5");
+}
+
+#[test]
+fn compat_big_endian() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let dt = crate::Datatype::FixedPoint {
+        size: 4,
+        byte_order: ByteOrder::BigEndian,
+        signed: true,
+        bit_offset: 0,
+        bit_precision: 32,
     };
-    let mut attr_value = b"m/s\0\0".to_vec();
-    attr_value.truncate(5);
-    ds.add_attribute("units", attr_type, &[], attr_value);
+    let vals: [i32; 6] = [1, 256, 65536, -1, 1000000, 0];
+    let data: Vec<u8> = vals.iter().flat_map(|x| x.to_be_bytes()).collect();
+    w.root_mut().add_dataset("be_data", dt, &[6], data);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/big_endian.h5");
+}
 
-    let our_bytes = w.to_bytes().unwrap();
-
-    // Compare byte-by-byte
-    if our_bytes != reference {
-        let max_len = our_bytes.len().max(reference.len());
-        let mut first_diff = None;
-        let mut diff_count = 0;
-        for i in 0..max_len {
-            let ours = our_bytes.get(i).copied();
-            let theirs = reference.get(i).copied();
-            if ours != theirs {
-                if first_diff.is_none() {
-                    first_diff = Some(i);
-                }
-                diff_count += 1;
-                if diff_count <= 20 {
-                    eprintln!(
-                        "  offset 0x{:04x}: ours={:?} ref={:?}",
-                        i,
-                        ours.map(|b| format!("0x{b:02x}")),
-                        theirs.map(|b| format!("0x{b:02x}")),
-                    );
-                }
-            }
-        }
-        panic!(
-            "byte mismatch: our_len={} ref_len={}, {} differences, first at offset 0x{:04x}",
-            our_bytes.len(),
-            reference.len(),
-            diff_count,
-            first_diff.unwrap_or(0),
-        );
+#[test]
+fn compat_compound() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let dt = crate::Datatype::Compound {
+        size: 12,
+        members: vec![
+            crate::datatype::CompoundMember {
+                name: "id".to_string(),
+                byte_offset: 0,
+                datatype: crate::Datatype::native_i32(),
+            },
+            crate::datatype::CompoundMember {
+                name: "x".to_string(),
+                byte_offset: 4,
+                datatype: crate::Datatype::native_f32(),
+            },
+            crate::datatype::CompoundMember {
+                name: "y".to_string(),
+                byte_offset: 8,
+                datatype: crate::Datatype::native_f32(),
+            },
+        ],
+    };
+    let mut data = Vec::new();
+    for &(id, x, y) in &[(1i32, 1.0f32, 2.0f32), (2, 3.0, 4.0), (3, 5.0, 6.0)] {
+        data.extend_from_slice(&id.to_le_bytes());
+        data.extend_from_slice(&x.to_le_bytes());
+        data.extend_from_slice(&y.to_le_bytes());
     }
+    w.root_mut().add_dataset("points", dt, &[3], data);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/compound.h5");
+}
+
+#[test]
+fn compat_enum() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let dt = crate::Datatype::Enum {
+        base: Box::new(crate::Datatype::native_i8()),
+        members: vec![
+            crate::datatype::EnumMember { name: "RED".to_string(), value: vec![0] },
+            crate::datatype::EnumMember { name: "GREEN".to_string(), value: vec![1] },
+            crate::datatype::EnumMember { name: "BLUE".to_string(), value: vec![2] },
+        ],
+    };
+    let data = vec![0i8 as u8, 1, 2, 1, 0];
+    w.root_mut().add_dataset("colors", dt, &[5], data);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/enum.h5");
+}
+
+#[test]
+fn compat_array() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let dt = crate::Datatype::Array {
+        element_type: Box::new(crate::Datatype::native_i32()),
+        dimensions: vec![3],
+    };
+    let data: Vec<u8> = (1..=12i32).flat_map(|x| x.to_le_bytes()).collect();
+    w.root_mut().add_dataset("vectors", dt, &[4], data);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/array.h5");
+}
+
+#[test]
+fn compat_complex() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let dt = crate::Datatype::Complex {
+        size: 16,
+        base: Box::new(crate::Datatype::native_f64()),
+    };
+    let data: Vec<u8> = [1.0f64, 2.0, 3.0, 4.0, -1.0, 0.0, 0.0, -5.0]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    w.root_mut().add_dataset("complex_data", dt, &[4], data);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/complex.h5");
+}
+
+#[test]
+fn compat_compound_complex_members() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let enum_type = crate::Datatype::Enum {
+        base: Box::new(crate::Datatype::native_i32()),
+        members: vec![
+            crate::datatype::EnumMember { name: "RED".to_string(), value: 0i32.to_le_bytes().to_vec() },
+            crate::datatype::EnumMember { name: "GREEN".to_string(), value: 1i32.to_le_bytes().to_vec() },
+            crate::datatype::EnumMember { name: "BLUE".to_string(), value: 2i32.to_le_bytes().to_vec() },
+        ],
+    };
+    let arr_type = crate::Datatype::Array {
+        element_type: Box::new(crate::Datatype::native_i32()),
+        dimensions: vec![3],
+    };
+    let dt = crate::Datatype::Compound {
+        size: 20,
+        members: vec![
+            crate::datatype::CompoundMember { name: "color".to_string(), byte_offset: 0, datatype: enum_type },
+            crate::datatype::CompoundMember { name: "coords".to_string(), byte_offset: 4, datatype: arr_type },
+            crate::datatype::CompoundMember { name: "id".to_string(), byte_offset: 16, datatype: crate::Datatype::native_i32() },
+        ],
+    };
+    let mut data = Vec::new();
+    // Record 0: RED(0), [10,20,30], 100
+    for v in [0i32, 10, 20, 30, 100] { data.extend_from_slice(&v.to_le_bytes()); }
+    // Record 1: GREEN(1), [40,50,60], 200
+    for v in [1i32, 40, 50, 60, 200] { data.extend_from_slice(&v.to_le_bytes()); }
+    // Record 2: BLUE(2), [70,80,90], 300
+    for v in [2i32, 70, 80, 90, 300] { data.extend_from_slice(&v.to_le_bytes()); }
+    w.root_mut().add_dataset("records", dt, &[3], data);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/compound_complex_members.h5");
+}
+
+#[test]
+fn compat_compact_v2() {
+    let mut w = FileWriter::with_options(compat_opts_v2());
+    let data: Vec<u8> = [100i16, 200, 300, 400]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w
+        .root_mut()
+        .add_dataset("small", crate::Datatype::native_i16(), &[4], data);
+    ds.set_layout(StorageLayout::Compact);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/compact_v2.h5");
+}
+
+#[test]
+fn compat_empty_chunked() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let ds = w.root_mut().add_dataset(
+        "empty",
+        crate::Datatype::native_i32(),
+        &[10],
+        vec![0u8; 40], // 10 * 4 bytes placeholder
+    );
+    ds.set_max_dims(&[u64::MAX]);
+    ds.set_layout(StorageLayout::Chunked {
+        chunk_dims: vec![5],
+        filters: vec![],
+    });
+    // Empty chunked means no data was written — clear the data.
+    ds.clear_data();
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/empty_chunked.h5");
+}
+
+#[test]
+#[cfg(feature = "system-zlib")]
+fn compat_fletcher32() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = (1..=10i32).map(|x| x * 100).flat_map(|x| x.to_le_bytes()).collect();
+    let ds = w.root_mut().add_dataset(
+        "checksummed",
+        crate::Datatype::native_i32(),
+        &[10],
+        vals,
+    );
+    ds.set_layout(StorageLayout::Chunked {
+        chunk_dims: vec![10],
+        filters: vec![crate::writer::types::ChunkFilter::Fletcher32],
+    });
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/fletcher32.h5");
+}
+
+#[test]
+#[cfg(feature = "system-zlib")]
+fn compat_shuffle_deflate() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = (0..20)
+        .map(|i| i as f32 * 1.5)
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w.root_mut().add_dataset(
+        "shuffled",
+        crate::Datatype::native_f32(),
+        &[20],
+        vals,
+    );
+    ds.set_layout(StorageLayout::Chunked {
+        chunk_dims: vec![20],
+        filters: vec![
+            crate::writer::types::ChunkFilter::Shuffle,
+            crate::writer::types::ChunkFilter::Deflate(4),
+        ],
+    });
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/shuffle_deflate_v3.h5");
+}
+
+#[test]
+fn compat_implicit_chunks() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = [1.1f64, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w.root_mut().add_dataset(
+        "implicit",
+        crate::Datatype::native_f64(),
+        &[8],
+        vals,
+    );
+    ds.set_chunked(&[4], vec![]);
+    ds.set_early_alloc();
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/implicit_chunks.h5");
+}
+
+#[test]
+fn compat_edge_chunks() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = (0..35i32).flat_map(|x| x.to_le_bytes()).collect();
+    let ds = w.root_mut().add_dataset(
+        "edge",
+        crate::Datatype::native_i32(),
+        &[7, 5],
+        vals,
+    );
+    ds.set_chunked(&[4, 3], vec![]);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/edge_chunks.h5");
+}
+
+#[test]
+fn compat_extensible_array() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = (1..=15i32)
+        .map(|x| x * 100)
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w.root_mut().add_dataset(
+        "extarray",
+        crate::Datatype::native_i32(),
+        &[15],
+        vals,
+    );
+    ds.set_max_dims(&[u64::MAX]);
+    ds.set_chunked(&[5], vec![]);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/extensible_array.h5");
+}
+
+#[test]
+#[cfg(feature = "system-zlib")]
+fn compat_chunked_deflate_v3() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = (0..100i32).flat_map(|x| x.to_le_bytes()).collect();
+    let ds = w.root_mut().add_dataset(
+        "compressed",
+        crate::Datatype::native_i32(),
+        &[10, 10],
+        vals,
+    );
+    ds.set_chunked(
+        &[5, 5],
+        vec![crate::writer::types::ChunkFilter::Deflate(6)],
+    );
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/chunked_deflate_v3.h5");
+}
+
+#[test]
+#[cfg(feature = "system-zlib")]
+fn compat_chunked_btree_v1() {
+    let mut w = FileWriter::with_options(compat_opts_v2());
+    let vals: Vec<u8> = (1..=12i32).map(|x| x * 10).flat_map(|x| x.to_le_bytes()).collect();
+    let ds = w.root_mut().add_dataset(
+        "chunked_v3",
+        crate::Datatype::native_i32(),
+        &[12],
+        vals,
+    );
+    ds.set_chunked(
+        &[4],
+        vec![crate::writer::types::ChunkFilter::Deflate(4)],
+    );
+    ds.set_layout_version(3);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/chunked_btree_v1.h5");
+}
+
+#[test]
+fn compat_ea_large() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let vals: Vec<u8> = (0..100i32)
+        .map(|x| x * 10)
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w.root_mut().add_dataset(
+        "large_ea",
+        crate::Datatype::native_i32(),
+        &[100],
+        vals,
+    );
+    ds.set_max_dims(&[u64::MAX]);
+    ds.set_chunked(&[4], vec![]);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/ea_large.h5");
 }

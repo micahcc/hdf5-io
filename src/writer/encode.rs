@@ -107,9 +107,17 @@ pub(crate) fn encode_object_header(
 }
 
 pub(crate) fn encode_superblock(root_group_addr: u64, eof: u64) -> Vec<u8> {
+    encode_superblock_versioned(root_group_addr, eof, 2)
+}
+
+pub(crate) fn encode_superblock_versioned(
+    root_group_addr: u64,
+    eof: u64,
+    version: u8,
+) -> Vec<u8> {
     let mut buf = Vec::with_capacity(SUPERBLOCK_SIZE);
     buf.extend_from_slice(&HDF5_SIGNATURE);
-    buf.push(2);
+    buf.push(version);
     buf.push(SIZE_OF_OFFSETS);
     buf.push(SIZE_OF_LENGTHS);
     buf.push(0);
@@ -391,11 +399,29 @@ pub(crate) fn encode_link(name: &str, target_addr: u64) -> Vec<u8> {
 
 /// Encode Fill Value message.
 ///
-/// When `compat` is true, use late space allocation (matching the C library default).
+/// When `compat` is true, use late space allocation (matching the C library default for contiguous).
 pub(crate) fn encode_fill_value_msg(fill_data: &Option<Vec<u8>>, compat: bool) -> Vec<u8> {
+    use crate::writer::types::SpaceAllocTime;
+    let alloc_time = if compat {
+        SpaceAllocTime::Late
+    } else {
+        SpaceAllocTime::Early
+    };
+    encode_fill_value_msg_alloc(fill_data, alloc_time)
+}
+
+/// Encode Fill Value message with explicit space allocation time.
+pub(crate) fn encode_fill_value_msg_alloc(
+    fill_data: &Option<Vec<u8>>,
+    alloc_time: crate::writer::types::SpaceAllocTime,
+) -> Vec<u8> {
+    let alloc_time = alloc_time as u8;
+    // flags bits 0-1: space alloc time, bits 2-3: fill write time (2=if-set),
+    // bit 5: fill value size+data present
+    let base_flags = 0x08 | (alloc_time & 0x03);
     match fill_data {
         Some(data) => {
-            let flags = if compat { 0x2a } else { 0x29 };
+            let flags = base_flags | 0x20; // bit 5: fill value present
             let mut buf = Vec::with_capacity(6 + data.len());
             buf.push(3);
             buf.push(flags);
@@ -404,12 +430,7 @@ pub(crate) fn encode_fill_value_msg(fill_data: &Option<Vec<u8>>, compat: bool) -
             buf
         }
         None => {
-            // Version 3, flags:
-            // bits 0-1: space alloc time (1=early, 2=late)
-            // bits 2-3: fill write time (2=if-set)
-            // bit 4: fill defined (0=no)
-            let flags = if compat { 0x0a } else { 0x09 };
-            vec![3, flags]
+            vec![3, base_flags]
         }
     }
 }
@@ -439,6 +460,20 @@ pub(crate) fn encode_compact_layout(data: &[u8]) -> Vec<u8> {
     buf.push(0);
     buf.extend_from_slice(&(data.len() as u16).to_le_bytes());
     buf.extend_from_slice(data);
+    buf
+}
+
+/// Encode a layout v3 chunked message (B-tree v1 chunk indexing).
+pub(crate) fn encode_chunked_layout_v3(
+    chunk_dims_with_elem: &[u64],
+    btree_addr: u64,
+) -> Vec<u8> {
+    let dimensionality = chunk_dims_with_elem.len() as u8;
+    let mut buf = vec![3, 2, dimensionality];
+    buf.extend_from_slice(&btree_addr.to_le_bytes());
+    for &dim in chunk_dims_with_elem {
+        buf.extend_from_slice(&(dim as u32).to_le_bytes());
+    }
     buf
 }
 
@@ -489,14 +524,16 @@ pub(crate) fn encode_chunked_layout(
         }
         2 => {}
         3 => {
-            buf.push(0);
+            // FixedArray: max_dblk_page_nelmts_bits (C library default: 10)
+            buf.push(10);
         }
         4 => {
-            buf.push(32);
-            buf.push(1);
-            buf.push(0);
-            buf.push(0);
-            buf.push(0);
+            // ExtArray creation parameters (C library defaults):
+            buf.push(32); // max_nelmts_bits
+            buf.push(4); // idx_blk_elmts
+            buf.push(4); // sup_blk_min_data_ptrs
+            buf.push(16); // data_blk_min_elmts
+            buf.push(10); // max_dblk_page_nelmts_bits
         }
         5 => {
             buf.extend_from_slice(&4096u32.to_le_bytes());
@@ -520,19 +557,19 @@ pub(crate) fn encode_filter_pipeline(chunk_filters: &[ChunkFilter], element_size
         match filter {
             ChunkFilter::Deflate(level) => {
                 buf.extend_from_slice(&filters::FILTER_DEFLATE.to_le_bytes());
-                buf.extend_from_slice(&0u16.to_le_bytes());
+                buf.extend_from_slice(&1u16.to_le_bytes()); // optional flag (C library default)
                 buf.extend_from_slice(&1u16.to_le_bytes());
                 buf.extend_from_slice(&level.to_le_bytes());
             }
             ChunkFilter::Shuffle => {
                 buf.extend_from_slice(&filters::FILTER_SHUFFLE.to_le_bytes());
-                buf.extend_from_slice(&0u16.to_le_bytes());
+                buf.extend_from_slice(&1u16.to_le_bytes()); // optional flag (C library default)
                 buf.extend_from_slice(&1u16.to_le_bytes());
                 buf.extend_from_slice(&element_size.to_le_bytes());
             }
             ChunkFilter::Fletcher32 => {
                 buf.extend_from_slice(&filters::FILTER_FLETCHER32.to_le_bytes());
-                buf.extend_from_slice(&0u16.to_le_bytes());
+                buf.extend_from_slice(&0u16.to_le_bytes()); // mandatory (C library default)
                 buf.extend_from_slice(&0u16.to_le_bytes());
             }
         }

@@ -22,6 +22,10 @@ pub struct WriteOptions {
 
     /// Metadata block size (used in compat mode). Default is 2048.
     pub meta_block_size: Option<usize>,
+
+    /// Superblock version to write. Default is 2.
+    /// Use 3 for V110+ (HDF5 1.10) compatibility.
+    pub superblock_version: Option<u8>,
 }
 
 /// Builds an HDF5 file in memory and writes it out.

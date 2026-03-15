@@ -28,6 +28,19 @@ pub enum StorageLayout {
     },
 }
 
+/// Space allocation time for dataset storage.
+///
+/// Controls when raw data storage is allocated in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAllocTime {
+    /// Allocate immediately when the dataset is created (compact datasets).
+    Early = 1,
+    /// Allocate when data is first written (contiguous datasets).
+    Late = 2,
+    /// Allocate incrementally as chunks are written (chunked datasets).
+    Incremental = 3,
+}
+
 pub(crate) enum ChildNode {
     Group(GroupNode),
     Dataset(DatasetNode),

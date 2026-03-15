@@ -16,6 +16,8 @@ pub struct DatasetNode {
     pub(crate) layout_version: u8,
     /// Variable-length data elements (if set, serialized into GCOL + heap IDs).
     pub(crate) vlen_elements: Option<Vec<Vec<u8>>>,
+    /// When true, use early space allocation (affects fill value flags and chunk index type).
+    pub(crate) early_alloc: bool,
 }
 
 impl DatasetNode {
@@ -30,6 +32,7 @@ impl DatasetNode {
             fill_value: None,
             layout_version: 4,
             vlen_elements: None,
+            early_alloc: false,
         }
     }
 
@@ -44,6 +47,7 @@ impl DatasetNode {
             fill_value: None,
             layout_version: 4,
             vlen_elements: Some(elements),
+            early_alloc: false,
         }
     }
 
@@ -96,6 +100,21 @@ impl DatasetNode {
     /// Set an explicit fill value for this dataset.
     pub fn set_fill_value(&mut self, value: Vec<u8>) -> &mut Self {
         self.fill_value = Some(value);
+        self
+    }
+
+    /// Clear raw data (for creating empty datasets, e.g. empty chunked).
+    pub fn clear_data(&mut self) -> &mut Self {
+        self.data.clear();
+        self
+    }
+
+    /// Use early space allocation (affects fill value flags and chunk index type).
+    ///
+    /// For chunked datasets, early allocation with no filters and fixed dimensions
+    /// selects the Implicit chunk index (no separate index structure).
+    pub fn set_early_alloc(&mut self) -> &mut Self {
+        self.early_alloc = true;
         self
     }
 }
