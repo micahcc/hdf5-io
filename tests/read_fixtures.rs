@@ -963,3 +963,44 @@ fn read_scaleoffset_dataset() {
 
     assert_eq!(values, vec![1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007]);
 }
+
+#[test]
+fn read_filtered_fheap_links() {
+    let file = hdf5_reader::File::open("tests/fixtures/filtered_fheap.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let grp = root.group("filtered_group").unwrap();
+
+    // Should be able to enumerate members through the filtered fractal heap
+    let members = grp.members().unwrap();
+    assert_eq!(members.len(), 31); // 30 soft links + 1 dataset
+
+    // Should be able to access the dataset through the group
+    let ds = grp.dataset("ds").unwrap();
+    let raw = ds.read_raw().unwrap();
+    assert_eq!(raw.len(), 32); // 4 * f64
+
+    let values: Vec<f64> = raw
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+        .collect();
+    assert_eq!(values, vec![10.0, 20.0, 30.0, 40.0]);
+}
+
+#[test]
+fn read_filtered_fheap_attributes() {
+    let file = hdf5_reader::File::open("tests/fixtures/filtered_fheap.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let grp = root.group("filtered_group").unwrap();
+
+    let attrs = grp.attributes().unwrap();
+    assert_eq!(attrs.len(), 2);
+
+    // Find attr_one and attr_two
+    let a1 = attrs.iter().find(|a| a.name == "attr_one").unwrap();
+    let a2 = attrs.iter().find(|a| a.name == "attr_two").unwrap();
+
+    let v1 = i32::from_le_bytes([a1.raw_value[0], a1.raw_value[1], a1.raw_value[2], a1.raw_value[3]]);
+    let v2 = i32::from_le_bytes([a2.raw_value[0], a2.raw_value[1], a2.raw_value[2], a2.raw_value[3]]);
+    assert_eq!(v1, 42);
+    assert_eq!(v2, 99);
+}

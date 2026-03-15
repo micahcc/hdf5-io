@@ -46,7 +46,7 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Tiny object decoding (inline in heap ID)
 - [x] Row/column calculations for block addressing
 - [x] Huge object reading (B-tree v2 lookup)
-- [ ] Filtered direct block handling
+- [x] Filtered direct block handling
 
 ## Phase 4b: Global Heap
 - [x] Global heap collection parsing (magic `GCOL`)

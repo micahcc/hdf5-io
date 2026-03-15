@@ -1,5 +1,6 @@
 use crate::checksum;
 use crate::error::{Error, Result};
+use crate::filters::FilterPipeline;
 use crate::io::{Le, ReadAt};
 
 /// Fractal heap header magic: `FRHP`
@@ -71,6 +72,8 @@ pub struct FractalHeapHeader {
     pub filtered_root_direct_block_size: Option<u64>,
     /// If I/O filters are present, the I/O filter mask.
     pub io_filter_mask: Option<u32>,
+    /// If I/O filters are present, the parsed filter pipeline.
+    pub filter_pipeline: Option<FilterPipeline>,
 }
 
 impl FractalHeapHeader {
@@ -145,17 +148,21 @@ impl FractalHeapHeader {
         pos += 2;
 
         // Optional I/O filter info
-        let (filtered_root_direct_block_size, io_filter_mask) =
+        let (filtered_root_direct_block_size, io_filter_mask, filter_pipeline) =
             if io_filter_encoded_length > 0 {
                 let fsize = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
                 pos += l;
                 let mask = Le::read_u32(reader, pos).map_err(Error::Io)?;
                 pos += 4;
-                // Skip the actual encoded filter pipeline bytes
-                pos += io_filter_encoded_length as u64;
-                (Some(fsize), Some(mask))
+                // Read and parse the encoded filter pipeline message
+                let fpl = io_filter_encoded_length as usize;
+                let mut filter_data = vec![0u8; fpl];
+                reader.read_exact_at(pos, &mut filter_data).map_err(Error::Io)?;
+                let pipeline = FilterPipeline::parse(&filter_data)?;
+                pos += fpl as u64;
+                (Some(fsize), Some(mask), Some(pipeline))
             } else {
-                (None, None)
+                (None, None, None)
             };
 
         // Checksum
@@ -199,6 +206,7 @@ impl FractalHeapHeader {
             current_root_rows,
             filtered_root_direct_block_size,
             io_filter_mask,
+            filter_pipeline,
         })
     }
 
@@ -343,7 +351,7 @@ fn read_managed_object_inner<R: ReadAt + ?Sized>(
     header: &FractalHeapHeader,
     heap_id: &[u8],
     size_of_offsets: u8,
-    _size_of_lengths: u8,
+    size_of_lengths: u8,
 ) -> Result<Vec<u8>> {
     // Managed heap ID layout (after the type/version nibble):
     //   offset: variable bits (max_heap_size_bits wide)
@@ -369,8 +377,14 @@ fn read_managed_object_inner<R: ReadAt + ?Sized>(
     }
 
     if header.root_is_direct() {
-        // Root is a direct block — read from it directly
-        read_from_direct_block(reader, header, root_addr, heap_offset, obj_length, size_of_offsets)
+        // Root is a direct block — may be filtered
+        let filtered_size = header.filtered_root_direct_block_size;
+        let filter_mask = header.io_filter_mask.unwrap_or(0);
+        let block_size = header.starting_block_size;
+        read_from_direct_block(
+            reader, header, root_addr, heap_offset, obj_length,
+            size_of_offsets, filtered_size, filter_mask, block_size,
+        )
     } else {
         // Root is an indirect block — need to traverse
         read_from_indirect_block(
@@ -381,6 +395,7 @@ fn read_managed_object_inner<R: ReadAt + ?Sized>(
             heap_offset,
             obj_length,
             size_of_offsets,
+            size_of_lengths,
         )
     }
 }
@@ -435,13 +450,19 @@ fn read_var_le(data: &[u8], len: usize) -> u64 {
 }
 
 /// Read an object from a direct block at the given heap offset.
+///
+/// If `filtered_size` is `Some`, the block is compressed: read `filtered_size` bytes,
+/// decompress through the heap's filter pipeline, then extract the object.
 fn read_from_direct_block<R: ReadAt + ?Sized>(
     reader: &R,
-    _header: &FractalHeapHeader,
+    header: &FractalHeapHeader,
     block_addr: u64,
     heap_offset: u64,
     obj_length: u64,
     _size_of_offsets: u8,
+    filtered_size: Option<u64>,
+    _filter_mask: u32,
+    block_size: u64,
 ) -> Result<Vec<u8>> {
     // Direct block layout:
     //   Signature "FHDB" (4)
@@ -453,23 +474,67 @@ fn read_from_direct_block<R: ReadAt + ?Sized>(
     //
     // The object is at (block_data_start + heap_offset_within_block).
 
-    let mut magic = [0u8; 4];
-    reader
-        .read_exact_at(block_addr, &mut magic)
-        .map_err(Error::Io)?;
-    if magic != FHDB_MAGIC {
-        return Err(Error::InvalidFractalHeap {
-            msg: format!("expected FHDB magic at {:#x}", block_addr),
-        });
-    }
+    if let (Some(fsize), Some(pipeline)) = (filtered_size, &header.filter_pipeline) {
+        // Filtered direct block: read the on-disk (compressed) data and decompress
+        let read_size = fsize as usize;
+        let mut compressed = vec![0u8; read_size];
+        reader
+            .read_exact_at(block_addr, &mut compressed)
+            .map_err(Error::Io)?;
 
-    // The heap offset in the managed object ID includes the direct block overhead.
-    // Objects are addressed relative to the start of the direct block.
-    let mut obj_data = vec![0u8; obj_length as usize];
-    reader
-        .read_exact_at(block_addr + heap_offset, &mut obj_data)
-        .map_err(Error::Io)?;
-    Ok(obj_data)
+        // Decompress through the filter pipeline
+        let decompressed = pipeline.decompress(compressed)?;
+
+        // Verify we got the expected block size
+        if decompressed.len() != block_size as usize {
+            return Err(Error::InvalidFractalHeap {
+                msg: format!(
+                    "filtered direct block decompressed to {} bytes, expected {}",
+                    decompressed.len(),
+                    block_size
+                ),
+            });
+        }
+
+        // Verify FHDB magic in decompressed data
+        if decompressed.len() < 4 || decompressed[..4] != FHDB_MAGIC {
+            return Err(Error::InvalidFractalHeap {
+                msg: format!("expected FHDB magic in decompressed block at {:#x}", block_addr),
+            });
+        }
+
+        // Extract the object from the decompressed block
+        let off = heap_offset as usize;
+        let end = off + obj_length as usize;
+        if end > decompressed.len() {
+            return Err(Error::InvalidFractalHeap {
+                msg: format!(
+                    "object at offset {} length {} exceeds decompressed block size {}",
+                    off, obj_length, decompressed.len()
+                ),
+            });
+        }
+        Ok(decompressed[off..end].to_vec())
+    } else {
+        // Unfiltered direct block: read directly from file
+        let mut magic = [0u8; 4];
+        reader
+            .read_exact_at(block_addr, &mut magic)
+            .map_err(Error::Io)?;
+        if magic != FHDB_MAGIC {
+            return Err(Error::InvalidFractalHeap {
+                msg: format!("expected FHDB magic at {:#x}", block_addr),
+            });
+        }
+
+        // The heap offset in the managed object ID includes the direct block overhead.
+        // Objects are addressed relative to the start of the direct block.
+        let mut obj_data = vec![0u8; obj_length as usize];
+        reader
+            .read_exact_at(block_addr + heap_offset, &mut obj_data)
+            .map_err(Error::Io)?;
+        Ok(obj_data)
+    }
 }
 
 /// Walk an indirect block to find the direct block containing `heap_offset`.
@@ -481,6 +546,7 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
     heap_offset: u64,
     obj_length: u64,
     size_of_offsets: u8,
+    size_of_lengths: u8,
 ) -> Result<Vec<u8>> {
     // Indirect block layout:
     //   Signature "FHIB" (4)
@@ -488,8 +554,8 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
     //   Heap header address (size_of_offsets)
     //   Block offset within heap (block_offset_byte_size bytes)
     //   Child block entries:
-    //     For direct block rows: address (size_of_offsets) [+ filtered size + filter mask if filtered]
-    //     For indirect block rows: address (size_of_offsets)
+    //     For direct block rows: address (O) [+ filtered_size (L) + filter_mask (4) if filtered]
+    //     For indirect block rows: address (O)
     //   Checksum (4)
 
     let mut magic = [0u8; 4];
@@ -507,6 +573,7 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
     let mut pos = iblock_addr + overhead;
 
     let width = header.table_width as u64;
+    let has_filters = header.io_filter_encoded_length > 0;
 
     // Determine which rows are direct vs indirect.
     // Rows 0..max_direct_rows are direct blocks.
@@ -531,12 +598,17 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
                 Le::read_offset(reader, pos, size_of_offsets).map_err(Error::Io)?;
             pos += size_of_offsets as u64;
 
-            // If filtered direct blocks, skip filtered_size and filter_mask
-            if is_direct && header.io_filter_encoded_length > 0 {
-                // filtered_size (size_of_lengths) + filter_mask (4)
-                // For simplicity, skip
-                pos += 8 + 4; // TODO: use actual size_of_lengths
-            }
+            // For filtered direct blocks, read filtered_size and filter_mask
+            let (entry_filtered_size, entry_filter_mask) =
+                if is_direct && has_filters {
+                    let fsize = Le::read_length(reader, pos, size_of_lengths).map_err(Error::Io)?;
+                    pos += size_of_lengths as u64;
+                    let fmask = Le::read_u32(reader, pos).map_err(Error::Io)?;
+                    pos += 4;
+                    (Some(fsize), fmask)
+                } else {
+                    (None, 0)
+                };
 
             let next_offset = current_heap_offset + block_size;
 
@@ -556,6 +628,9 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
                         offset_in_block,
                         obj_length,
                         size_of_offsets,
+                        entry_filtered_size,
+                        entry_filter_mask,
+                        block_size,
                     );
                 } else {
                     // Recurse into indirect block
@@ -568,6 +643,7 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
                         offset_in_block,
                         obj_length,
                         size_of_offsets,
+                        size_of_lengths,
                     );
                 }
             }

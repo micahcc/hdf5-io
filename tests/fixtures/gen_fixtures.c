@@ -940,6 +940,61 @@ static void create_scaleoffset(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* Filtered fractal heap: group with deflate on dense link/attribute storage */
+static void create_filtered_fheap(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V18, H5F_LIBVER_V18);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Create gcpl with deflate and force dense storage immediately (thresholds 0,0) */
+    hid_t gcpl = H5Pcreate(H5P_GROUP_CREATE);
+    H5Pset_link_phase_change(gcpl, 0, 0);
+    H5Pset_deflate(gcpl, 6);
+
+    /* Create group with filtered fractal heap */
+    hid_t grp = H5Gcreate2(file, "filtered_group", H5P_DEFAULT, gcpl, H5P_DEFAULT);
+
+    /* Add many soft links to potentially force indirect blocks */
+    char lname[32];
+    for (int i = 0; i < 30; i++) {
+        snprintf(lname, sizeof(lname), "link_%03d", i);
+        H5Lcreate_soft("/", grp, lname, H5P_DEFAULT, H5P_DEFAULT);
+    }
+
+    /* Also add a hard-linked dataset so we can verify data access through the group */
+    hsize_t dims[1] = {4};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(grp, "ds", H5T_IEEE_F64LE, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    double values[4] = {10.0, 20.0, 30.0, 40.0};
+    H5Dwrite(dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, values);
+
+    /* Add attributes to the group (also in the filtered fractal heap) */
+    hid_t ascalar = H5Screate(H5S_SCALAR);
+    hid_t a1 = H5Acreate2(grp, "attr_one", H5T_NATIVE_INT32, ascalar,
+                           H5P_DEFAULT, H5P_DEFAULT);
+    int32_t v1 = 42;
+    H5Awrite(a1, H5T_NATIVE_INT32, &v1);
+    H5Aclose(a1);
+
+    hid_t a2 = H5Acreate2(grp, "attr_two", H5T_NATIVE_INT32, ascalar,
+                           H5P_DEFAULT, H5P_DEFAULT);
+    int32_t v2 = 99;
+    H5Awrite(a2, H5T_NATIVE_INT32, &v2);
+    H5Aclose(a2);
+    H5Sclose(ascalar);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Gclose(grp);
+    H5Pclose(gcpl);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 int main(void)
 {
     create_simple_contiguous("simple_contiguous_v2.h5");
@@ -970,5 +1025,6 @@ int main(void)
     create_complex("complex.h5");
     create_nbit("nbit.h5");
     create_scaleoffset("scaleoffset.h5");
+    create_filtered_fheap("filtered_fheap.h5");
     return 0;
 }
