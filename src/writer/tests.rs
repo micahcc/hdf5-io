@@ -1247,6 +1247,22 @@ fn compat_btree_v2_filtered() {
 }
 
 #[test]
+fn compat_btree_v2_deep() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    // 20×10, chunk 1×1, 200 chunks → depth-1 BTree v2
+    let vals: Vec<u8> = (0..200i32).flat_map(|x| x.to_le_bytes()).collect();
+    let ds = w.root_mut().add_dataset(
+        "deep",
+        crate::Datatype::native_i32(),
+        &[20, 10],
+        vals,
+    );
+    ds.set_max_dims(&[u64::MAX, u64::MAX]);
+    ds.set_chunked(&[1, 1], vec![]);
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/btree_v2_deep.h5");
+}
+
+#[test]
 fn compat_vlen_strings() {
     let mut w = FileWriter::with_options(compat_opts_v3());
     let dt = crate::Datatype::VarLen {

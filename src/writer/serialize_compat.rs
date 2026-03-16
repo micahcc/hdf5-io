@@ -66,14 +66,22 @@ pub(crate) fn write_tree_compat(
             obj.data_addr = data_pos as u64;
             data_pos += obj.data.len();
         }
-        // BTreeV2: place leaf node after chunk data, aligned to meta_block_size.
+        // BTreeV2: place nodes after chunk data, aligned to meta_block_size.
         if let ObjectKind::Dataset(ref d) = obj.kind {
             if let Some(ref ci) = d.chunked_info {
                 if ci.index_type_id == 5 && !ci.chunk_data_parts.is_empty() {
-                    let leaf_addr = align_up(data_pos, meta_block_size);
-                    let node_size = 2048;
-                    obj.btree_leaf_addr = leaf_addr as u64;
-                    data_pos = leaf_addr + node_size;
+                    let nodes_start = align_up(data_pos, meta_block_size);
+                    let node_size = 2048usize;
+                    let nchunks = ci.chunk_data_parts.len();
+                    let unfilt_chunk_bytes: u64 = ci.chunk_dims_with_elem.iter().product();
+                    let has_filters = !ci.filters.is_empty();
+                    let (_bt, rec_size, _csl) =
+                        btree_v2_record_info(ci.ndims, has_filters, unfilt_chunk_bytes);
+                    let layout = compute_btree_v2_layout(nchunks, rec_size as usize, node_size);
+                    let num_nodes = layout.num_nodes();
+                    obj.btree_v2_nodes_start = nodes_start as u64;
+                    obj.btree_v2_num_nodes = num_nodes;
+                    data_pos = nodes_start + num_nodes * node_size;
                 }
             }
         }
@@ -109,7 +117,7 @@ pub(crate) fn write_tree_compat(
                 if let Some(ref ci) = d.chunked_info {
                     let index_addr = meta_addr + objects[i].ohdr_size as u64;
                     let index_bytes =
-                        encode_chunk_index(ci, index_addr, data_addr, objects[i].btree_leaf_addr)?;
+                        encode_chunk_index(ci, index_addr, data_addr, objects[i].btree_v2_nodes_start)?;
                     let istart = index_addr as usize;
                     buf[istart..istart + index_bytes.len()]
                         .copy_from_slice(&index_bytes);
@@ -145,8 +153,8 @@ pub(crate) fn write_tree_compat(
             }
         }
 
-        // Write BTreeV2 leaf node if applicable.
-        if objects[i].btree_leaf_addr != UNDEF_ADDR {
+        // Write BTreeV2 nodes if applicable.
+        if objects[i].btree_v2_nodes_start != UNDEF_ADDR {
             if let ObjectKind::Dataset(ref d) = objects[i].kind {
                 if let Some(ref ci) = d.chunked_info {
                     if ci.index_type_id == 5 {
@@ -160,7 +168,7 @@ pub(crate) fn write_tree_compat(
                         let unfilt_chunk_bytes: u64 =
                             ci.chunk_dims_with_elem.iter().product();
                         let has_filters = !ci.filters.is_empty();
-                        let (btree_type, _rec_size, chunk_size_len) =
+                        let (btree_type, rec_size, chunk_size_len) =
                             btree_v2_record_info(ci.ndims, has_filters, unfilt_chunk_bytes);
                         let mut filt_sizes: Vec<u64> = ci
                             .chunk_data_parts
@@ -170,17 +178,23 @@ pub(crate) fn write_tree_compat(
                         if filt_sizes.is_empty() {
                             filt_sizes = vec![0; chunk_addrs.len()];
                         }
-                        let leaf = encode_btree_v2_leaf(
+                        let node_size = 2048usize;
+                        let nodes_start = objects[i].btree_v2_nodes_start as usize;
+                        let layout = compute_btree_v2_layout(
+                            chunk_addrs.len(), rec_size as usize, node_size,
+                        );
+                        write_btree_v2_nodes(
+                            &mut buf,
+                            nodes_start,
+                            node_size,
+                            &layout,
                             &chunk_addrs,
                             &ci.chunk_coords,
                             &filt_sizes,
                             ci.ndims,
                             btree_type,
                             chunk_size_len,
-                            2048,
                         );
-                        let leaf_start = objects[i].btree_leaf_addr as usize;
-                        buf[leaf_start..leaf_start + leaf.len()].copy_from_slice(&leaf);
                     }
                 }
             }
@@ -208,8 +222,10 @@ struct ObjectInfo {
     target_chunk_size: Option<usize>,
     /// Size of chunk index metadata (FixedArray/ExtArray header+dblk) placed after OHDR.
     index_meta_size: usize,
-    /// For BTreeV2: address of the leaf node (placed after chunk data).
-    btree_leaf_addr: u64,
+    /// For BTreeV2: start address of the node region (placed after chunk data).
+    btree_v2_nodes_start: u64,
+    /// For BTreeV2: number of node_size nodes allocated.
+    btree_v2_num_nodes: usize,
 }
 
 enum ObjectKind {
@@ -275,7 +291,8 @@ fn flatten_tree(
         child_indices: vec![],
         target_chunk_size: None,
         index_meta_size: 0,
-        btree_leaf_addr: UNDEF_ADDR,
+        btree_v2_nodes_start: UNDEF_ADDR,
+        btree_v2_num_nodes: 0,
     });
 
     // Recursively flatten children.
@@ -403,7 +420,8 @@ fn flatten_dataset(
         child_indices: vec![],
         target_chunk_size: target_chunk,
         index_meta_size,
-        btree_leaf_addr: UNDEF_ADDR,
+        btree_v2_nodes_start: UNDEF_ADDR,
+        btree_v2_num_nodes: 0,
     });
 
     Ok(idx)
@@ -829,7 +847,7 @@ fn encode_chunk_index(
     ci: &ChunkedInfo,
     index_addr: u64,
     data_addr: u64,
-    btree_leaf_addr: u64,
+    btree_v2_nodes_start: u64,
 ) -> Result<Vec<u8>> {
     // Compute per-chunk addresses within the data blob.
     let mut chunk_addrs = Vec::with_capacity(ci.chunk_data_parts.len());
@@ -865,8 +883,19 @@ fn encode_chunk_index(
             let has_filters = !ci.filters.is_empty();
             let (btree_type, rec_size, _csl) =
                 btree_v2_record_info(ci.ndims, has_filters, unfilt_chunk_bytes);
-            let nrecords = chunk_addrs.len() as u16;
-            Ok(encode_btree_v2_header(btree_leaf_addr, btree_type, rec_size, nrecords))
+            let nrecords = chunk_addrs.len();
+            let node_size = 2048usize;
+            let layout = compute_btree_v2_layout(nrecords, rec_size as usize, node_size);
+            // Root node address: for depth 0, first node (leaf); for depth 1, second node (internal)
+            let root_addr = btree_v2_nodes_start + (layout.root_node_index() * node_size) as u64;
+            Ok(encode_btree_v2_header(
+                root_addr,
+                btree_type,
+                rec_size,
+                layout.depth,
+                layout.root_nrec() as u16,
+                nrecords as u64,
+            ))
         }
         _ => Ok(vec![]),
     }
@@ -1334,7 +1363,9 @@ fn encode_btree_v2_header(
     root_addr: u64,
     btree_type: u8,
     rec_size: u16,
-    nrecords: u16,
+    depth: u16,
+    root_nrec: u16,
+    total_records: u64,
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(38);
     buf.extend_from_slice(b"BTHD");
@@ -1342,12 +1373,12 @@ fn encode_btree_v2_header(
     buf.push(btree_type);
     buf.extend_from_slice(&2048u32.to_le_bytes()); // node_size
     buf.extend_from_slice(&rec_size.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes()); // depth = 0 (single leaf)
+    buf.extend_from_slice(&depth.to_le_bytes());
     buf.push(100); // split_percent
     buf.push(40); // merge_percent
     buf.extend_from_slice(&root_addr.to_le_bytes());
-    buf.extend_from_slice(&nrecords.to_le_bytes());
-    buf.extend_from_slice(&(nrecords as u64).to_le_bytes());
+    buf.extend_from_slice(&root_nrec.to_le_bytes());
+    buf.extend_from_slice(&total_records.to_le_bytes());
     let cs = crate::checksum::lookup3(&buf);
     buf.extend_from_slice(&cs.to_le_bytes());
     debug_assert_eq!(buf.len(), 38);
@@ -1399,6 +1430,350 @@ fn encode_btree_v2_leaf(
     buf.extend_from_slice(&cs.to_le_bytes());
     buf.resize(node_size, 0);
     debug_assert_eq!(buf.len(), node_size);
+    buf
+}
+
+/// Layout of a BTree v2 tree produced by the C library's insertion algorithm.
+/// For depth 0: single leaf node.
+/// For depth 1: one internal node + multiple leaf nodes.
+struct BTreeV2Layout {
+    depth: u16,
+    /// Number of records in each leaf, in allocation order.
+    /// For depth 0: [nrecords].
+    /// For depth 1: [leaf0_nrec, leaf1_nrec, ...].
+    leaf_nrecs: Vec<usize>,
+    /// Records that live in the internal node (indices into the global record list).
+    /// Empty for depth 0.
+    internal_records: Vec<usize>,
+}
+
+impl BTreeV2Layout {
+    /// Total number of node_size nodes needed (leaves + internal).
+    fn num_nodes(&self) -> usize {
+        if self.depth == 0 {
+            1
+        } else {
+            // Allocation order: leaf0, internal, leaf1, leaf2, ...
+            1 + self.leaf_nrecs.len()
+        }
+    }
+
+    /// Index of the root node in the allocation sequence.
+    fn root_node_index(&self) -> usize {
+        if self.depth == 0 { 0 } else { 1 } // internal is the 2nd node allocated
+    }
+
+    /// Number of records in the root node.
+    fn root_nrec(&self) -> usize {
+        if self.depth == 0 {
+            self.leaf_nrecs[0]
+        } else {
+            self.internal_records.len()
+        }
+    }
+}
+
+/// Simulate the C library's BTree v2 insertion to determine the final tree layout.
+fn compute_btree_v2_layout(nrecords: usize, rec_size: usize, node_size: usize) -> BTreeV2Layout {
+    let max_leaf_nrec = (node_size - 10) / rec_size; // 10 = sig(4)+ver(1)+type(1)+checksum(4)
+    let split_nrec = (max_leaf_nrec * 100) / 100; // split_percent=100
+
+    if nrecords <= max_leaf_nrec {
+        return BTreeV2Layout {
+            depth: 0,
+            leaf_nrecs: vec![nrecords],
+            internal_records: vec![],
+        };
+    }
+
+    // Simulate insertion with split/redistribute.
+    // leaves[i] = number of records in leaf i.
+    // internal_recs = list of global record indices stored in the internal node.
+    // leaf_contents[i] = list of global record indices in leaf i.
+    let mut leaf_contents: Vec<Vec<usize>> = vec![vec![]];
+    let mut internal_recs: Vec<usize> = vec![];
+
+    for rec in 0..nrecords {
+        if leaf_contents.len() == 1 && internal_recs.is_empty() {
+            // Depth 0: single leaf
+            if leaf_contents[0].len() == split_nrec {
+                // Split root
+                let old = &leaf_contents[0];
+                let mid = old.len() / 2;
+                let left = old[..mid].to_vec();
+                let right = old[mid + 1..].to_vec();
+                internal_recs.push(old[mid]);
+                leaf_contents = vec![left, right];
+                // Now insert the current record
+                insert_into_tree(rec, &mut leaf_contents, &mut internal_recs, split_nrec);
+            } else {
+                leaf_contents[0].push(rec);
+            }
+        } else {
+            insert_into_tree(rec, &mut leaf_contents, &mut internal_recs, split_nrec);
+        }
+    }
+
+    BTreeV2Layout {
+        depth: 1,
+        leaf_nrecs: leaf_contents.iter().map(|l| l.len()).collect(),
+        internal_records: internal_recs,
+    }
+}
+
+/// Insert a record into a depth-1 BTree v2 (internal node + leaf children).
+fn insert_into_tree(
+    rec: usize,
+    leaves: &mut Vec<Vec<usize>>,
+    internal_recs: &mut Vec<usize>,
+    split_nrec: usize,
+) {
+    // Find which child to insert into (binary search on internal records).
+    let mut idx = internal_recs.partition_point(|&r| r < rec);
+    if idx < internal_recs.len() && internal_recs[idx] == rec {
+        idx += 1; // shouldn't happen, but be safe
+    }
+
+    let mut retries = 2u32;
+    while leaves[idx].len() == split_nrec {
+        let nchildren = leaves.len();
+        if idx == 0 {
+            // Left-most child
+            if retries > 0 && leaves[idx + 1].len() < split_nrec {
+                redistribute2(leaves, internal_recs, idx);
+            } else {
+                split1(leaves, internal_recs, idx);
+            }
+        } else if idx == nchildren - 1 {
+            // Right-most child
+            if retries > 0 && leaves[idx - 1].len() < split_nrec {
+                redistribute2(leaves, internal_recs, idx - 1);
+            } else {
+                split1(leaves, internal_recs, idx);
+            }
+        } else {
+            // Middle child
+            if retries > 0
+                && (leaves[idx + 1].len() < split_nrec || leaves[idx - 1].len() < split_nrec)
+            {
+                redistribute2(leaves, internal_recs, idx - 1);
+            } else {
+                split1(leaves, internal_recs, idx);
+            }
+        }
+        // Re-locate
+        idx = internal_recs.partition_point(|&r| r < rec);
+        if idx < internal_recs.len() && internal_recs[idx] == rec {
+            idx += 1;
+        }
+        retries = retries.saturating_sub(1);
+    }
+
+    leaves[idx].push(rec);
+}
+
+/// Redistribute records between leaves[idx] and leaves[idx+1].
+fn redistribute2(
+    leaves: &mut Vec<Vec<usize>>,
+    internal_recs: &mut Vec<usize>,
+    idx: usize,
+) {
+    let left_n = leaves[idx].len();
+    let right_n = leaves[idx + 1].len();
+
+    if left_n < right_n {
+        // Move from right to left
+        let new_right_n = (left_n + right_n) / 2;
+        let move_n = right_n - new_right_n;
+        let moved: Vec<usize> = leaves[idx + 1][..move_n].to_vec();
+        // Parent record goes down into left
+        leaves[idx].push(internal_recs[idx]);
+        // move_n-1 records from start of right go to left
+        leaves[idx].extend_from_slice(&moved[..move_n - 1]);
+        // Record at move_n-1 in right becomes new parent
+        internal_recs[idx] = moved[move_n - 1];
+        // Right keeps from move_n onwards
+        leaves[idx + 1] = leaves[idx + 1][move_n..].to_vec();
+    } else {
+        // Move from left to right
+        let new_left_n = (left_n + right_n) / 2;
+        let move_n = left_n - new_left_n;
+        // Build new right: records from end of left + parent + old right
+        let mut new_right = leaves[idx][left_n - move_n + 1..].to_vec();
+        new_right.push(internal_recs[idx]);
+        new_right.extend_from_slice(&leaves[idx + 1]);
+        leaves[idx + 1] = new_right;
+        // New parent record
+        internal_recs[idx] = leaves[idx][left_n - move_n];
+        leaves[idx].truncate(left_n - move_n);
+    }
+}
+
+/// Split leaves[idx] into two, promoting middle record to internal.
+fn split1(
+    leaves: &mut Vec<Vec<usize>>,
+    internal_recs: &mut Vec<usize>,
+    idx: usize,
+) {
+    let old = &leaves[idx];
+    let mid = old.len() / 2;
+    let new_leaf = old[mid + 1..].to_vec();
+    let mid_rec = old[mid];
+    leaves[idx] = old[..mid].to_vec();
+    internal_recs.insert(idx, mid_rec);
+    leaves.insert(idx + 1, new_leaf);
+}
+
+/// Write all BTree v2 nodes into the buffer.
+fn write_btree_v2_nodes(
+    buf: &mut [u8],
+    nodes_start: usize,
+    node_size: usize,
+    layout: &BTreeV2Layout,
+    chunk_addrs: &[u64],
+    chunk_coords: &[Vec<u64>],
+    filtered_sizes: &[u64],
+    ndims: usize,
+    btree_type: u8,
+    chunk_size_len: usize,
+) {
+    if layout.depth == 0 {
+        // Single leaf at nodes_start
+        let leaf = encode_btree_v2_leaf(
+            chunk_addrs,
+            chunk_coords,
+            filtered_sizes,
+            ndims,
+            btree_type,
+            chunk_size_len,
+            node_size,
+        );
+        buf[nodes_start..nodes_start + node_size].copy_from_slice(&leaf);
+        return;
+    }
+
+    // Depth 1: allocation order is leaf0, internal, leaf1, leaf2, ...
+    // Compute node addresses
+    let leaf0_addr = nodes_start;
+    let internal_addr = nodes_start + node_size;
+    let mut leaf_addrs: Vec<usize> = vec![leaf0_addr];
+    for i in 1..layout.leaf_nrecs.len() {
+        leaf_addrs.push(nodes_start + (1 + i) * node_size);
+    }
+
+    // Build the record-index-to-global mapping. We need to figure out which
+    // global records are in each leaf and which are in the internal node.
+    // The global record order is 0..nrecords-1 (sorted), and the layout tells
+    // us which indices are in internal vs leaves.
+
+    // Reconstruct which global records are in each leaf.
+    // All records are 0..total-1. Internal records are known. Leaf records are
+    // the rest, distributed according to leaf_nrecs.
+    let total = chunk_addrs.len();
+    let mut all_sorted: Vec<usize> = (0..total).collect();
+    // Remove internal records
+    for &ir in &layout.internal_records {
+        all_sorted.retain(|&x| x != ir);
+    }
+    // Split into leaf groups by count
+    let mut leaf_records: Vec<Vec<usize>> = Vec::new();
+    let mut pos = 0;
+    for &nrec in &layout.leaf_nrecs {
+        leaf_records.push(all_sorted[pos..pos + nrec].to_vec());
+        pos += nrec;
+    }
+
+    // Write leaf nodes
+    for (li, leaf_recs) in leaf_records.iter().enumerate() {
+        let addrs: Vec<u64> = leaf_recs.iter().map(|&r| chunk_addrs[r]).collect();
+        let coords: Vec<Vec<u64>> = leaf_recs.iter().map(|&r| chunk_coords[r].clone()).collect();
+        let fsizes: Vec<u64> = leaf_recs.iter().map(|&r| filtered_sizes[r]).collect();
+        let leaf = encode_btree_v2_leaf(&addrs, &coords, &fsizes, ndims, btree_type, chunk_size_len, node_size);
+        let addr = leaf_addrs[li];
+        buf[addr..addr + node_size].copy_from_slice(&leaf);
+    }
+
+    // Write internal node (BTIN)
+    let rec_size = if btree_type == 11 {
+        8 + chunk_size_len + 4 + ndims * 8
+    } else {
+        8 + ndims * 8
+    };
+    let max_leaf_nrec = (node_size - 10) / rec_size;
+    let nrec_width: usize = if max_leaf_nrec <= 255 { 1 } else { 2 };
+
+    let internal = encode_btree_v2_internal(
+        &layout.internal_records,
+        chunk_addrs,
+        chunk_coords,
+        filtered_sizes,
+        ndims,
+        btree_type,
+        chunk_size_len,
+        &leaf_addrs,
+        &layout.leaf_nrecs,
+        nrec_width,
+        node_size,
+    );
+    buf[internal_addr..internal_addr + node_size].copy_from_slice(&internal);
+}
+
+/// Encode a BTree v2 internal node (BTIN).
+fn encode_btree_v2_internal(
+    internal_records: &[usize],
+    chunk_addrs: &[u64],
+    chunk_coords: &[Vec<u64>],
+    filtered_sizes: &[u64],
+    ndims: usize,
+    btree_type: u8,
+    chunk_size_len: usize,
+    child_addrs: &[usize],
+    child_nrecs: &[usize],
+    nrec_width: usize,
+    node_size: usize,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(node_size);
+    buf.extend_from_slice(b"BTIN");
+    buf.push(0); // version
+    buf.push(btree_type);
+
+    // Records
+    for &rec_idx in internal_records {
+        buf.extend_from_slice(&chunk_addrs[rec_idx].to_le_bytes());
+        if btree_type == 11 {
+            let nbytes = filtered_sizes[rec_idx];
+            match chunk_size_len {
+                1 => buf.push(nbytes as u8),
+                2 => buf.extend_from_slice(&(nbytes as u16).to_le_bytes()),
+                4 => buf.extend_from_slice(&(nbytes as u32).to_le_bytes()),
+                8 => buf.extend_from_slice(&nbytes.to_le_bytes()),
+                _ => {
+                    for b in 0..chunk_size_len {
+                        buf.push((nbytes >> (b * 8)) as u8);
+                    }
+                }
+            }
+            buf.extend_from_slice(&0u32.to_le_bytes()); // filter_mask
+        }
+        for d in 0..ndims {
+            buf.extend_from_slice(&chunk_coords[rec_idx][d].to_le_bytes());
+        }
+    }
+
+    // Child pointers: addr(8) + nrec(nrec_width) for each child
+    for (ci, &addr) in child_addrs.iter().enumerate() {
+        buf.extend_from_slice(&(addr as u64).to_le_bytes());
+        match nrec_width {
+            1 => buf.push(child_nrecs[ci] as u8),
+            2 => buf.extend_from_slice(&(child_nrecs[ci] as u16).to_le_bytes()),
+            _ => unreachable!(),
+        }
+    }
+
+    // Checksum immediately after, then zero-pad
+    let cs = crate::checksum::lookup3(&buf);
+    buf.extend_from_slice(&cs.to_le_bytes());
+    buf.resize(node_size, 0);
     buf
 }
 
