@@ -1558,6 +1558,40 @@ static void create_swmr(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* Simpler version of fheap_indirect: 27 groups with longer names
+ * so the fractal heap overflows into an indirect block (5+ direct blocks)
+ * but the B-tree stays at depth 0 (single leaf, no splits).
+ * This avoids the complex interleaved allocation pattern. */
+static void create_fheap_indirect_simple(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Force dense link storage immediately */
+    hid_t gcpl = H5Pcreate(H5P_GROUP_CREATE);
+    H5Pset_link_phase_change(gcpl, 0, 0);
+
+    hid_t grp = H5Gcreate2(file, "many", H5P_DEFAULT, gcpl, H5P_DEFAULT);
+
+    /* 27 child groups with ~64-char names to overflow into 5+ direct blocks
+     * while keeping B-tree at depth 0 (27 < 45 max records per leaf) */
+    char name[80];
+    for (int i = 0; i < 27; i++) {
+        snprintf(name, sizeof(name),
+                 "child_group_%04d_with_extra_padding_to_make_the_name_longer_end", i);
+        hid_t child = H5Gcreate2(grp, name, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+        H5Gclose(child);
+    }
+
+    H5Gclose(grp);
+    H5Pclose(gcpl);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 int main(void)
 {
     create_simple_contiguous("simple_contiguous_v2.h5");
@@ -1597,5 +1631,6 @@ int main(void)
     create_compound_complex_members("compound_complex_members.h5");
     create_swmr("swmr.h5");
     create_lzf("lzf_c.h5");
+    create_fheap_indirect_simple("fheap_indirect_simple.h5");
     return 0;
 }

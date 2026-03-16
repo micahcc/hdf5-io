@@ -1437,6 +1437,24 @@ fn compat_creation_order() {
 }
 
 #[test]
+fn compat_fheap_indirect_simple() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let grp = w.root_mut().add_group("many");
+    grp.set_link_phase_change(0, 0);
+    for i in 0..27 {
+        let name = format!(
+            "child_group_{:04}_with_extra_padding_to_make_the_name_longer_end",
+            i
+        );
+        grp.add_group(&name);
+    }
+    assert_bytes_match(
+        &w.to_bytes().unwrap(),
+        "tests/fixtures/fheap_indirect_simple.h5",
+    );
+}
+
+#[test]
 fn compat_scaleoffset() {
     let mut w = FileWriter::with_options(compat_opts_v2());
     let vals: Vec<u8> = (1000..1008i32).flat_map(|x| x.to_le_bytes()).collect();

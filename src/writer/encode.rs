@@ -512,6 +512,16 @@ pub(crate) fn encode_link_body_crt_order(
     buf
 }
 
+/// Encode LinkInfo message with dense addresses (no creation order).
+pub(crate) fn encode_link_info_dense(frhp_addr: u64, bthd_name_addr: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(18);
+    buf.push(0); // version
+    buf.push(0x00); // flags: no creation order
+    buf.extend_from_slice(&frhp_addr.to_le_bytes());
+    buf.extend_from_slice(&bthd_name_addr.to_le_bytes());
+    buf
+}
+
 /// Encode LinkInfo message with dense addresses and creation order.
 pub(crate) fn encode_link_info_dense_crt(
     frhp_addr: u64,

@@ -123,6 +123,11 @@ pub(crate) fn write_tree_compat(
                     let meta_bytes = encode_creation_order_index_meta(&objects[i], g, opts)?;
                     let istart = index_addr as usize;
                     buf[istart..istart + meta_bytes.len()].copy_from_slice(&meta_bytes);
+                } else if !g.crt_order_child_names.is_empty() {
+                    // Dense-link group (no creation order): interleaved child OHDRs + heap meta.
+                    let meta_bytes = encode_dense_link_index_meta(&objects[i], g, opts)?;
+                    let istart = index_addr as usize;
+                    buf[istart..istart + meta_bytes.len()].copy_from_slice(&meta_bytes);
                 } else if let Some(ref storage) = g.dense_attr_storage {
                     let dense_bytes = crate::writer::dense_attrs::encode_dense_attr_structures(
                         storage, index_addr,
@@ -177,6 +182,10 @@ pub(crate) fn write_tree_compat(
                     // Creation-order group: encode FHDBs in data region.
                     let fhdbs = encode_creation_order_fhdbs(&objects[i], g, opts)?;
                     buf[ds..ds + fhdbs.len()].copy_from_slice(&fhdbs);
+                } else if !g.crt_order_child_names.is_empty() {
+                    // Dense-link group: encode FHDBs + FHIB in data region.
+                    let data_bytes = encode_dense_link_data(&objects[i], g, opts)?;
+                    buf[ds..ds + data_bytes.len()].copy_from_slice(&data_bytes);
                 }
             } else if let ObjectKind::Dataset(ref d) = objects[i].kind {
                 if let Some(ref storage) = d.dense_attr_storage {
@@ -396,6 +405,15 @@ fn flatten_tree(
     // Creation-order groups have a special interleaved metadata layout.
     if group.link_creation_order {
         return flatten_creation_order_group(group, opts, objects);
+    }
+
+    // Dense link storage without creation order (fractal heap indirect block).
+    // All children are encoded inline in the index_meta region.
+    if group.link_phase_change == Some((0, 0))
+        && !group.link_creation_order
+        && !group.children.is_empty()
+    {
+        return flatten_dense_link_group(group, opts, objects);
     }
 
     // Determine if dense attribute storage is needed.
@@ -666,6 +684,150 @@ fn flatten_creation_order_group(
         ohdr_size,
         meta_addr: 0,
         data,
+        data_addr: 0,
+        child_indices: vec![],
+        target_chunk_size: None,
+        index_meta_size,
+        btree_v2_nodes_start: UNDEF_ADDR,
+        btree_v2_num_nodes: 0,
+    });
+
+    Ok(my_index)
+}
+
+/// Flatten a dense-link group (link_phase_change(0,0), no creation order).
+///
+/// Child OHDRs and dense link structures are inlined into the index_meta region.
+/// FHDBs + FHIB go in the data region.
+///
+/// File layout:
+///   group_ohdr | child_0_ohdr | FRHP+BTHD+FSHD+BTLF | children_1..N | FSSE | [data: FHDBs+FHIB]
+fn flatten_dense_link_group(
+    group: &GroupNode,
+    opts: &WriteOptions,
+    objects: &mut Vec<ObjectInfo>,
+) -> Result<usize> {
+    let my_index = objects.len();
+    let child_names: Vec<String> = group.children.iter().map(|(n, _)| n.clone()).collect();
+    let n_children = child_names.len();
+
+    // All children are empty groups. Compute child OHDR size.
+    let child_target_chunk = compat_group_chunk_size(4, 8); // 120
+    let child_ohdr_size = ohdr_overhead(child_target_chunk, opts); // 147 with timestamps
+
+    // Dense link storage (placeholder addresses to compute sizes).
+    let placeholder_addrs: Vec<u64> = vec![0xDEAD_0000; n_children];
+    let link_bodies: Vec<Vec<u8>> = child_names
+        .iter()
+        .zip(placeholder_addrs.iter())
+        .map(|(name, addr)| crate::writer::dense_attrs::encode_link_body_no_crt(name, *addr))
+        .collect();
+    let total_link_bytes: usize = link_bodies.iter().map(|b| b.len()).sum();
+
+    // Compute doubling table to determine block count and sizes.
+    let start_block_size = 512usize;
+    let max_heap_size_bits: u16 = 32;
+    let block_offset_bytes = (max_heap_size_bits as usize).div_ceil(8); // 4
+    let dblk_header_size = 4 + 1 + 8 + block_offset_bytes + 4; // 21
+    let heap_id_len: u16 = 7;
+    let node_size = 512usize;
+    let rec_size: u16 = 4 + heap_id_len; // 11
+
+    // Use the doubling table computation from dense_attrs.
+    let dtable = crate::writer::dense_attrs::compute_doubling_table_pub(
+        total_link_bytes,
+        start_block_size,
+        dblk_header_size,
+    );
+    let n_blocks = dtable.block_sizes.len();
+    let nrows = dtable.nrows;
+
+    // Distribute link bodies across blocks to compute free space.
+    let mut block_used: Vec<usize> = vec![dblk_header_size; n_blocks];
+    let mut block_idx = 0;
+    for body in &link_bodies {
+        let bsz = dtable.block_sizes[block_idx];
+        if block_used[block_idx] + body.len() > bsz && block_idx + 1 < n_blocks {
+            block_idx += 1;
+        }
+        block_used[block_idx] += body.len();
+    }
+
+    // Compute free sections.
+    let mut block_free: Vec<(usize, usize)> = Vec::new(); // (heap_addr_of_free_start, free_size)
+    for bi in 0..n_blocks {
+        let bsz = dtable.block_sizes[bi];
+        let blk_heap_off = dtable.block_offsets[bi] as usize;
+        let free = bsz - block_used[bi];
+        if free > 0 {
+            block_free.push((blk_heap_off + block_used[bi], free));
+        }
+    }
+    let total_free: u64 = block_free.iter().map(|(_, f)| *f as u64).sum();
+    let n_sections = block_free.len();
+
+    // Compute FSSE size.
+    let sect_off_size = 4usize; // (max_heap_size_bits + 7) / 8
+    let sect_len_size = crate::writer::dense_attrs::limit_enc_size_u64_pub(65536).max(1); // max_sect_size from FSHD
+    let sect_cnt_size =
+        crate::writer::dense_attrs::limit_enc_size_u64_pub(n_sections as u64).max(1);
+
+    // Group sections by size.
+    let mut size_groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for &(addr, size) in &block_free {
+        size_groups.entry(size).or_default().push(addr);
+    }
+
+    let mut fsse_data_len = 0usize;
+    for (_, addrs) in &size_groups {
+        fsse_data_len += sect_cnt_size;
+        fsse_data_len += sect_len_size;
+        fsse_data_len += addrs.len() * (sect_off_size + 1);
+    }
+    let fsse_size = 4 + 1 + 8 + fsse_data_len + 4; // sig+ver+fshd_addr+data+cksum
+
+    // Dense link metadata sizes.
+    let frhp_size = 146usize;
+    let bthd_size = 38usize;
+    let fshd_size = 82usize;
+    let btlf_size = node_size;
+
+    // Index meta layout:
+    //   child_0_ohdr + FRHP + BTHD + FSHD + BTLF + children_1..N + FSSE
+    let index_meta_size = child_ohdr_size
+        + frhp_size
+        + bthd_size
+        + fshd_size
+        + btlf_size
+        + (n_children - 1) * child_ohdr_size
+        + fsse_size;
+
+    // Data region: FHDBs (reverse block_offset order) + FHIB.
+    let fhib_size = 4 + 1 + 8 + block_offset_bytes + nrows * dtable.width * 8 + 4;
+    let data_size: usize = dtable.block_sizes.iter().sum::<usize>() + fhib_size;
+
+    // Group OHDR: link info (no crt order) + group info (with phase change 0,0).
+    // Messages: LinkInfo(4+18=22) + GroupInfo(4+6=10) = 32 chunk.
+    // OHDR = sig(4)+ver(1)+flags(1)+timestamps(16)+chunk_size(1)+32+cksum(4) = 59
+    let ohdr_chunk_size = 32;
+    let ohdr_size = 4 + 1 + 1 + 16 + 1 + ohdr_chunk_size + 4; // 59
+
+    objects.push(ObjectInfo {
+        kind: ObjectKind::Group(GroupRef {
+            attributes: vec![],
+            attr_phase_change: group.attr_phase_change,
+            dense_attr_storage: None,
+            dense_attr_meta_size: 0,
+            link_phase_change: group.link_phase_change,
+            link_creation_order: false,
+            attr_creation_order: false,
+            dense_link_storage: None,
+            crt_order_child_names: child_names,
+        }),
+        ohdr_size,
+        meta_addr: 0,
+        data: vec![0u8; data_size],
         data_addr: 0,
         child_indices: vec![],
         target_chunk_size: None,
@@ -1057,6 +1219,10 @@ fn encode_object_final(
             // Creation-order group OHDR: CONT + NIL + GroupInfo, 6-byte headers.
             encode_creation_order_ohdr(obj, g, opts)
         }
+        ObjectKind::Group(g) if !g.link_creation_order && !g.crt_order_child_names.is_empty() => {
+            // Dense-link group without creation order: LinkInfo + GroupInfo only.
+            encode_dense_link_ohdr(obj, g, opts)
+        }
         ObjectKind::Group(g) => {
             let mut messages: Vec<OhdrMsg> = Vec::new();
             messages.push((MessageType::LinkInfo.as_u8(), encode_link_info(), 0));
@@ -1307,6 +1473,64 @@ fn encode_object_final(
 /// The C library's allocation history produces: CONT + NIL + GroupInfo
 /// (LinkInfo was replaced with CONT+NIL; GroupInfo stays at its original position).
 /// chunk_size = 52, flags = 0x3C.
+/// Encode OHDR for a dense-link group without creation order.
+///
+/// Messages: LinkInfo(18 body) + GroupInfo(6 body, with link phase change).
+/// 4-byte message headers. chunk0 = 32.
+fn encode_dense_link_ohdr(obj: &ObjectInfo, g: &GroupRef, opts: &WriteOptions) -> Result<Vec<u8>> {
+    use crate::writer::encode::encode_group_info_with_link_phase;
+    use crate::writer::encode::encode_link_info_dense;
+
+    let base_addr = obj.meta_addr + obj.ohdr_size as u64;
+    let child_target = compat_group_chunk_size(4, 8);
+    let child_ohdr_size = ohdr_overhead(child_target, opts);
+
+    // FRHP is after child_0 OHDR.
+    let frhp_addr = base_addr + child_ohdr_size as u64;
+    let bthd_addr = frhp_addr + 146; // FRHP size
+
+    let link_info_body = encode_link_info_dense(frhp_addr, bthd_addr);
+    let (max_compact, min_dense) = g.link_phase_change.unwrap_or((0, 0));
+    let group_info_body = encode_group_info_with_link_phase(max_compact, min_dense);
+
+    let chunk_size: usize = 4 + link_info_body.len() + 4 + group_info_body.len(); // 32
+
+    let mut buf = Vec::with_capacity(59);
+
+    // Prefix: OHDR + ver + flags + timestamps + chunk_size
+    buf.extend_from_slice(b"OHDR");
+    buf.push(2); // version
+    buf.push(0x20); // flags: bit 5 = timestamps
+
+    if let Some((at, mt, ct, bt)) = opts.timestamps {
+        buf.extend_from_slice(&at.to_le_bytes());
+        buf.extend_from_slice(&mt.to_le_bytes());
+        buf.extend_from_slice(&ct.to_le_bytes());
+        buf.extend_from_slice(&bt.to_le_bytes());
+    }
+
+    buf.push(chunk_size as u8); // 1-byte chunk size (< 256)
+
+    // Message 1: LinkInfo (4-byte header + 18-byte body)
+    buf.push(MessageType::LinkInfo.as_u8());
+    buf.extend_from_slice(&(link_info_body.len() as u16).to_le_bytes());
+    buf.push(0x00); // flags
+    buf.extend_from_slice(&link_info_body);
+
+    // Message 2: GroupInfo (4-byte header + 6-byte body)
+    buf.push(MessageType::GroupInfo.as_u8());
+    buf.extend_from_slice(&(group_info_body.len() as u16).to_le_bytes());
+    buf.push(0x01); // constant flag
+    buf.extend_from_slice(&group_info_body);
+
+    // Checksum
+    let cksum = crate::checksum::lookup3(&buf);
+    buf.extend_from_slice(&cksum.to_le_bytes());
+
+    debug_assert_eq!(buf.len(), 59);
+    Ok(buf)
+}
+
 fn encode_creation_order_ohdr(
     obj: &ObjectInfo,
     g: &GroupRef,
@@ -1659,6 +1883,383 @@ fn encode_creation_order_fhdbs(
     buf.extend_from_slice(&fhdb_attr);
     buf.extend_from_slice(&fhdb_link);
     Ok(buf)
+}
+
+/// Encode the index_meta region for a dense-link group (no creation order).
+///
+/// Layout: child_0 OHDR | FRHP | BTHD | FSHD | BTLF | children 1..N OHDRs | FSSE
+fn encode_dense_link_index_meta(
+    obj: &ObjectInfo,
+    g: &GroupRef,
+    opts: &WriteOptions,
+) -> Result<Vec<u8>> {
+    use crate::writer::dense_attrs::encode_link_body_no_crt;
+    use crate::writer::dense_attrs::limit_enc_size_u64_pub;
+
+    let n_children = g.crt_order_child_names.len();
+    let child_target = compat_group_chunk_size(4, 8);
+    let child_ohdr_size = ohdr_overhead(child_target, opts);
+
+    let base_addr = obj.meta_addr + obj.ohdr_size as u64;
+    let start_block_size = 512usize;
+    let max_heap_size_bits: u16 = 32;
+    let block_offset_bytes = (max_heap_size_bits as usize).div_ceil(8); // 4
+    let dblk_header_size = 4 + 1 + 8 + block_offset_bytes + 4; // 21
+    let heap_id_len: u16 = 7;
+    let node_size = 512usize;
+    let rec_size: u16 = 4 + heap_id_len; // 11
+    let frhp_size = 146usize;
+    let bthd_size = 38usize;
+    let fshd_size = 82usize;
+
+    // Compute child addresses.
+    let child_addrs: Vec<u64> = (0..n_children)
+        .map(|i| {
+            if i == 0 {
+                base_addr // child_0 is first in index_meta
+            } else {
+                // children 1..N are after BTLF
+                let offset_in_meta = child_ohdr_size // child_0
+                    + frhp_size + bthd_size + fshd_size + node_size // FRHP+BTHD+FSHD+BTLF
+                    + (i - 1) * child_ohdr_size;
+                base_addr + offset_in_meta as u64
+            }
+        })
+        .collect();
+
+    // Build link bodies and hashes.
+    let link_bodies: Vec<Vec<u8>> = g
+        .crt_order_child_names
+        .iter()
+        .zip(child_addrs.iter())
+        .map(|(name, addr)| encode_link_body_no_crt(name, *addr))
+        .collect();
+    let total_link_bytes: usize = link_bodies.iter().map(|b| b.len()).sum();
+    let name_hashes: Vec<u32> = g
+        .crt_order_child_names
+        .iter()
+        .map(|n| crate::checksum::lookup3(n.as_bytes()))
+        .collect();
+
+    // Compute doubling table.
+    let dtable = crate::writer::dense_attrs::compute_doubling_table_pub(
+        total_link_bytes,
+        start_block_size,
+        dblk_header_size,
+    );
+    let n_blocks = dtable.block_sizes.len();
+    let nrows = dtable.nrows;
+
+    // Distribute links across blocks.
+    let mut block_bodies: Vec<Vec<usize>> = vec![Vec::new(); n_blocks]; // indices into link_bodies
+    let mut block_used: Vec<usize> = vec![dblk_header_size; n_blocks];
+    let mut block_idx = 0;
+    for (li, body) in link_bodies.iter().enumerate() {
+        let bsz = dtable.block_sizes[block_idx];
+        if block_used[block_idx] + body.len() > bsz && block_idx + 1 < n_blocks {
+            block_idx += 1;
+        }
+        block_bodies[block_idx].push(li);
+        block_used[block_idx] += body.len();
+    }
+
+    // Compute heap offsets for each link.
+    let mut heap_offsets: Vec<usize> = vec![0; n_children];
+    for bi in 0..n_blocks {
+        let blk_heap_off = dtable.block_offsets[bi] as usize;
+        let mut off_in_blk = dblk_header_size;
+        for &li in &block_bodies[bi] {
+            heap_offsets[li] = blk_heap_off + off_in_blk;
+            off_in_blk += link_bodies[li].len();
+        }
+    }
+
+    // Build heap IDs (7 bytes each).
+    let mut heap_ids: Vec<[u8; 7]> = Vec::with_capacity(n_children);
+    for i in 0..n_children {
+        let off = heap_offsets[i] as u64;
+        let len = link_bodies[i].len() as u64;
+        let mut hid = [0u8; 7];
+        hid[0] = 0x00;
+        let packed = off | (len << 32);
+        hid[1..].copy_from_slice(&packed.to_le_bytes()[..6]);
+        heap_ids.push(hid);
+    }
+
+    // Sort records by hash for B-tree.
+    let mut name_records: Vec<(u32, usize)> = name_hashes
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, h)| (h, i))
+        .collect();
+    name_records.sort_by_key(|&(hash, _)| hash);
+
+    // Compute free space per block.
+    let mut block_free: Vec<(usize, usize)> = Vec::new();
+    for bi in 0..n_blocks {
+        let bsz = dtable.block_sizes[bi];
+        let free = bsz - block_used[bi];
+        if free > 0 {
+            block_free.push((dtable.block_offsets[bi] as usize + block_used[bi], free));
+        }
+    }
+    let total_free: u64 = block_free.iter().map(|(_, f)| *f as u64).sum();
+    let n_sections = block_free.len();
+    // FSSE sizing.
+    let sect_off_size = 4usize;
+    let sect_len_size = limit_enc_size_u64_pub(65536u64).max(1); // max_sect_size from FSHD
+    let sect_cnt_size = limit_enc_size_u64_pub(n_sections as u64).max(1);
+    let mut size_groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for &(addr, size) in &block_free {
+        size_groups.entry(size).or_default().push(addr);
+    }
+    let mut fsse_data_len = 0usize;
+    for (_, addrs) in &size_groups {
+        fsse_data_len += sect_cnt_size + sect_len_size + addrs.len() * (sect_off_size + 1);
+    }
+    let fsse_size = 4 + 1 + 8 + fsse_data_len + 4;
+
+    // Addresses in the file.
+    let frhp_addr = base_addr + child_ohdr_size as u64;
+    let bthd_addr = frhp_addr + frhp_size as u64;
+    let fshd_addr = bthd_addr + bthd_size as u64;
+    let btlf_addr = fshd_addr + fshd_size as u64;
+    let remaining_start = btlf_addr + node_size as u64;
+    let fsse_addr = remaining_start + ((n_children - 1) * child_ohdr_size) as u64;
+
+    let fhib_data_offset = dtable.block_sizes.iter().sum::<usize>();
+    let fhib_file_addr = obj.data_addr + fhib_data_offset as u64;
+
+    // Build FHDB file addresses (reverse block_offset order).
+    let mut fhdb_file_order: Vec<usize> = (0..n_blocks).collect();
+    fhdb_file_order.reverse();
+    let mut fhdb_file_addrs: Vec<u64> = vec![0; n_blocks];
+    let mut file_off = obj.data_addr;
+    for &bi in &fhdb_file_order {
+        fhdb_file_addrs[bi] = file_off;
+        file_off += dtable.block_sizes[bi] as u64;
+    }
+
+    // === Encode FRHP ===
+    // FRHP free_managed counts free across ALL managed space (including unallocated slots).
+    let all_headers = (nrows * dtable.width * dblk_header_size) as u64;
+    let frhp_free_managed = dtable.total_managed_space - total_link_bytes as u64 - all_headers;
+    let frhp = crate::writer::dense_attrs::encode_frhp_indirect_pub(
+        heap_id_len,
+        max_heap_size_bits,
+        n_children as u64,
+        frhp_free_managed,
+        fshd_addr,
+        dtable.total_managed_space,
+        dtable.total_alloc,
+        dtable.total_alloc, // iter_offset
+        start_block_size as u64,
+        fhib_file_addr,
+        nrows as u16,
+    );
+
+    // === Encode BTHD ===
+    let bthd = crate::writer::dense_attrs::encode_bthd_pub(
+        btlf_addr,
+        n_children as u16,
+        n_children as u64,
+        rec_size,
+        node_size as u32,
+        5, // type 5 = name hash
+        0, // depth 0
+    );
+
+    // === Encode FSHD ===
+    let fshd = crate::writer::dense_attrs::encode_fshd_multi_pub(
+        total_free,
+        n_sections as u64,
+        fsse_addr,
+        fsse_size as u64,
+        max_heap_size_bits,
+    );
+
+    // === Encode BTLF ===
+    let btlf =
+        crate::writer::dense_attrs::encode_btlf_type5_pub(&name_records, &heap_ids, node_size);
+
+    // === Encode child OHDRs ===
+    let child_ohdr_bytes = encode_empty_group_ohdr(opts)?;
+
+    // === Encode FSSE ===
+    let mut fsse_buf = vec![0u8; fsse_size];
+    fsse_buf[0..4].copy_from_slice(b"FSSE");
+    fsse_buf[4] = 0;
+    fsse_buf[5..13].copy_from_slice(&fshd_addr.to_le_bytes());
+    let mut fsse_off = 13;
+    for (&size, addrs) in &size_groups {
+        fsse_buf[fsse_off..fsse_off + sect_cnt_size]
+            .copy_from_slice(&(addrs.len() as u64).to_le_bytes()[..sect_cnt_size]);
+        fsse_off += sect_cnt_size;
+        fsse_buf[fsse_off..fsse_off + sect_len_size]
+            .copy_from_slice(&(size as u64).to_le_bytes()[..sect_len_size]);
+        fsse_off += sect_len_size;
+        let mut sorted_addrs = addrs.clone();
+        sorted_addrs.sort();
+        for &addr in &sorted_addrs {
+            fsse_buf[fsse_off..fsse_off + sect_off_size]
+                .copy_from_slice(&(addr as u64).to_le_bytes()[..sect_off_size]);
+            fsse_off += sect_off_size;
+            fsse_buf[fsse_off] = 0; // type SINGLE
+            fsse_off += 1;
+        }
+    }
+    let fsse_cksum = crate::checksum::lookup3(&fsse_buf[..fsse_size - 4]);
+    fsse_buf[fsse_size - 4..].copy_from_slice(&fsse_cksum.to_le_bytes());
+
+    // === Assemble index_meta ===
+    let total_size = obj.index_meta_size;
+    let mut buf = Vec::with_capacity(total_size);
+
+    // child_0 OHDR
+    buf.extend_from_slice(&child_ohdr_bytes);
+    // FRHP + BTHD + FSHD + BTLF
+    buf.extend_from_slice(&frhp);
+    buf.extend_from_slice(&bthd);
+    buf.extend_from_slice(&fshd);
+    buf.extend_from_slice(&btlf);
+    // children 1..N OHDRs
+    for _ in 1..n_children {
+        buf.extend_from_slice(&child_ohdr_bytes);
+    }
+    // FSSE
+    buf.extend_from_slice(&fsse_buf);
+
+    debug_assert_eq!(buf.len(), total_size);
+    Ok(buf)
+}
+
+/// Encode the data region for a dense-link group: FHDBs (reverse order) + FHIB.
+fn encode_dense_link_data(obj: &ObjectInfo, g: &GroupRef, opts: &WriteOptions) -> Result<Vec<u8>> {
+    use crate::writer::dense_attrs::encode_link_body_no_crt;
+
+    let n_children = g.crt_order_child_names.len();
+    let child_target = compat_group_chunk_size(4, 8);
+    let child_ohdr_size = ohdr_overhead(child_target, opts);
+
+    let base_addr = obj.meta_addr + obj.ohdr_size as u64;
+    let start_block_size = 512usize;
+    let max_heap_size_bits: u16 = 32;
+    let block_offset_bytes = (max_heap_size_bits as usize).div_ceil(8);
+    let dblk_header_size = 4 + 1 + 8 + block_offset_bytes + 4;
+    let frhp_size = 146usize;
+    let bthd_size = 38usize;
+    let fshd_size = 82usize;
+    let node_size = 512usize;
+
+    // Compute child addresses (same as index_meta).
+    let child_addrs: Vec<u64> = (0..n_children)
+        .map(|i| {
+            if i == 0 {
+                base_addr
+            } else {
+                let offset_in_meta = child_ohdr_size
+                    + frhp_size
+                    + bthd_size
+                    + fshd_size
+                    + node_size
+                    + (i - 1) * child_ohdr_size;
+                base_addr + offset_in_meta as u64
+            }
+        })
+        .collect();
+
+    let link_bodies: Vec<Vec<u8>> = g
+        .crt_order_child_names
+        .iter()
+        .zip(child_addrs.iter())
+        .map(|(name, addr)| encode_link_body_no_crt(name, *addr))
+        .collect();
+    let total_link_bytes: usize = link_bodies.iter().map(|b| b.len()).sum();
+
+    let dtable = crate::writer::dense_attrs::compute_doubling_table_pub(
+        total_link_bytes,
+        start_block_size,
+        dblk_header_size,
+    );
+    let n_blocks = dtable.block_sizes.len();
+    let nrows = dtable.nrows;
+
+    // Distribute links across blocks.
+    let mut block_bodies: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
+    let mut block_used: Vec<usize> = vec![dblk_header_size; n_blocks];
+    let mut block_idx = 0;
+    for (li, body) in link_bodies.iter().enumerate() {
+        let bsz = dtable.block_sizes[block_idx];
+        if block_used[block_idx] + body.len() > bsz && block_idx + 1 < n_blocks {
+            block_idx += 1;
+        }
+        block_bodies[block_idx].push(li);
+        block_used[block_idx] += body.len();
+    }
+
+    let frhp_addr = base_addr + child_ohdr_size as u64;
+
+    // FHDB file addresses (reverse block_offset order).
+    let mut fhdb_file_order: Vec<usize> = (0..n_blocks).collect();
+    fhdb_file_order.reverse();
+    let mut fhdb_file_addrs: Vec<u64> = vec![0; n_blocks];
+    let mut file_off = obj.data_addr;
+    for &bi in &fhdb_file_order {
+        fhdb_file_addrs[bi] = file_off;
+        file_off += dtable.block_sizes[bi] as u64;
+    }
+
+    // Encode FHDBs in reverse block_offset order.
+    let mut data_buf = Vec::new();
+    for &bi in &fhdb_file_order {
+        let bsz = dtable.block_sizes[bi];
+        let mut blk = vec![0u8; bsz];
+        blk[0..4].copy_from_slice(b"FHDB");
+        blk[4] = 0; // version
+        blk[5..13].copy_from_slice(&frhp_addr.to_le_bytes());
+        let bo = dtable.block_offsets[bi];
+        blk[13..13 + block_offset_bytes].copy_from_slice(&bo.to_le_bytes()[..block_offset_bytes]);
+
+        // Place link bodies.
+        let mut off_in_blk = dblk_header_size;
+        for &li in &block_bodies[bi] {
+            blk[off_in_blk..off_in_blk + link_bodies[li].len()].copy_from_slice(&link_bodies[li]);
+            off_in_blk += link_bodies[li].len();
+        }
+
+        // Checksum over entire block.
+        let cksum_off = 4 + 1 + 8 + block_offset_bytes;
+        let cksum = crate::checksum::lookup3(&blk);
+        blk[cksum_off..cksum_off + 4].copy_from_slice(&cksum.to_le_bytes());
+
+        data_buf.extend_from_slice(&blk);
+    }
+
+    // Encode FHIB.
+    let n_entries = nrows * dtable.width;
+    let fhib_size = 4 + 1 + 8 + block_offset_bytes + n_entries * 8 + 4;
+    let mut fhib = vec![0u8; fhib_size];
+    fhib[0..4].copy_from_slice(b"FHIB");
+    fhib[4] = 0; // version
+    fhib[5..13].copy_from_slice(&frhp_addr.to_le_bytes());
+    // block_offset = 0 (already zero)
+
+    let mut off = 4 + 1 + 8 + block_offset_bytes;
+    for entry_idx in 0..n_entries {
+        if entry_idx < n_blocks {
+            fhib[off..off + 8].copy_from_slice(&fhdb_file_addrs[entry_idx].to_le_bytes());
+        } else {
+            fhib[off..off + 8].copy_from_slice(&UNDEF_ADDR.to_le_bytes());
+        }
+        off += 8;
+    }
+    let cksum = crate::checksum::lookup3(&fhib[..off]);
+    fhib[off..off + 4].copy_from_slice(&cksum.to_le_bytes());
+
+    data_buf.extend_from_slice(&fhib);
+    Ok(data_buf)
 }
 
 fn build_group_messages_dummy(
